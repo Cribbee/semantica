@@ -2,7 +2,7 @@
 
 ``ContextRetriever`` expects ``knowledge_graph.query(question)`` to perform
 semantic entity retrieval, while graph database backends use ``query`` for a
-native query language.  This adapter keeps those contracts separate:
+native query language. This adapter keeps those contracts separate:
 
 * :meth:`query` accepts a natural-language question and delegates to
   :meth:`HugeGraphStore.search_nodes`;
@@ -10,7 +10,7 @@ native query language.  This adapter keeps those contracts separate:
 * :meth:`get_neighbors` expands only the selected local subgraph and carries
   path, direction, relationship properties and evidence attributes forward.
 
-The adapter does not extract entities or build another business graph.  It is a
+The adapter does not extract entities or build another business graph. It is a
 read-through view over the existing HugeGraph data and can be combined with a
 separate Semantica vector store for hybrid retrieval.
 """
@@ -24,6 +24,23 @@ from ..graph_store.hugegraph_store import HugeGraphStore
 from ..utils.exceptions import ValidationError
 
 NodeId = Union[int, str]
+
+_SOURCE_ID_PROPERTIES = (
+    "source",
+    "source_id",
+    "source_uri",
+    "source_url",
+    "document_id",
+    "doc_id",
+    "chunk_id",
+)
+_EVIDENCE_PROPERTIES = (
+    "quote",
+    "provenance",
+    "evidence",
+    "witness",
+    "witnesses",
+)
 
 
 def _first_text(properties: Dict[str, Any], names: Sequence[str]) -> str:
@@ -51,6 +68,17 @@ def _values(properties: Dict[str, Any], names: Iterable[str]) -> List[Any]:
     return output
 
 
+def _path_marker(node: Dict[str, Any]) -> tuple[Any, tuple[str, ...], tuple[str, ...]]:
+    path = tuple(str(item) for item in node.get("path") or [])
+    relationships = node.get("path_relationships") or []
+    relationship_markers = tuple(
+        f"{relationship.get('id')}:{relationship.get('type')}"
+        for relationship in relationships
+        if isinstance(relationship, dict)
+    )
+    return node.get("id"), path, relationship_markers
+
+
 class HugeGraphContextAdapter:
     """Read-only semantic retrieval view over :class:`HugeGraphStore`."""
 
@@ -62,6 +90,7 @@ class HugeGraphContextAdapter:
         text_properties: Optional[Sequence[str]] = None,
         content_properties: Optional[Sequence[str]] = None,
         source_properties: Optional[Sequence[str]] = None,
+        evidence_properties: Optional[Sequence[str]] = None,
         time_properties: Optional[Sequence[str]] = None,
         relationship_types: Optional[Sequence[str]] = None,
         direction: str = "both",
@@ -84,19 +113,13 @@ class HugeGraphContextAdapter:
                 "name",
             )
         )
-        self.source_properties = list(
-            source_properties
-            or (
-                "source",
-                "source_id",
-                "source_uri",
-                "source_url",
-                "document_id",
-                "chunk_id",
-                "quote",
-                "provenance",
-                "evidence",
-            )
+        # ``sources`` is deliberately identity-only. Quotes and provenance
+        # payloads remain available through the original properties and the
+        # separate ``evidence_values`` metadata field, so callers cannot mistake
+        # an entire quote for a source identifier.
+        self.source_properties = list(source_properties or _SOURCE_ID_PROPERTIES)
+        self.evidence_properties = list(
+            evidence_properties or _EVIDENCE_PROPERTIES
         )
         self.time_properties = list(
             time_properties
@@ -113,8 +136,7 @@ class HugeGraphContextAdapter:
         normalized_direction = direction.lower()
         if normalized_direction not in {"in", "out", "both"}:
             raise ValidationError(
-                "Unsupported HugeGraph context direction: "
-                f"{direction!r}"
+                "Unsupported HugeGraph context direction: " f"{direction!r}"
             )
         self.direction = normalized_direction
         self.max_results = max(1, int(max_results))
@@ -134,6 +156,7 @@ class HugeGraphContextAdapter:
             "node_id": node.get("id"),
             "node_type": node_type,
             "sources": _values(properties, self.source_properties),
+            "evidence_values": _values(properties, self.evidence_properties),
             "time_constraints": _values(properties, self.time_properties),
             "backend": "hugegraph",
         }
@@ -202,9 +225,7 @@ class HugeGraphContextAdapter:
                 raw_node = {
                     "id": raw_node.get("id"),
                     "labels": (
-                        [raw_node.get("type")]
-                        if raw_node.get("type")
-                        else []
+                        [raw_node.get("type")] if raw_node.get("type") else []
                     ),
                     "properties": (
                         raw_node.get("properties")
@@ -271,7 +292,7 @@ class HugeGraphContextAdapter:
 
         raw_neighbors: List[Dict[str, Any]] = []
         if relationship_types:
-            seen: set[str] = set()
+            seen: set[tuple[Any, tuple[str, ...], tuple[str, ...]]] = set()
             for rel_type in relationship_types:
                 nodes = self.store.get_neighbors(
                     node_id,
@@ -281,7 +302,7 @@ class HugeGraphContextAdapter:
                     **options,
                 )
                 for node in nodes:
-                    marker = repr(node.get("id"))
+                    marker = _path_marker(node)
                     if marker not in seen:
                         seen.add(marker)
                         raw_neighbors.append(node)
@@ -297,9 +318,7 @@ class HugeGraphContextAdapter:
         for raw in raw_neighbors:
             semantic = self._semantic_node(raw)
             path = list(raw.get("path") or [])
-            raw_relationships = list(
-                raw.get("path_relationships") or []
-            )
+            raw_relationships = list(raw.get("path_relationships") or [])
             relationships: List[Dict[str, Any]] = []
             for index, relationship in enumerate(raw_relationships):
                 previous = path[index] if index < len(path) else None
