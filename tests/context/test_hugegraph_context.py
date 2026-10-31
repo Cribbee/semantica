@@ -26,6 +26,7 @@ class Store:
                     "properties": {
                         "statement": "A sourced claim",
                         "source_id": "doc:1",
+                        "quote": "A quote is evidence, not a source id",
                         "published_at": "2026-01-02",
                     },
                 },
@@ -84,6 +85,32 @@ class Store:
         return []
 
 
+class MultiPathStore(Store):
+    def get_neighbors(self, node_id, **options):
+        self.neighbor_calls.append((node_id, options))
+        rel_type = options.get("rel_type")
+        intermediary = "event:1" if rel_type == "SUPPORTED_BY" else "event:2"
+        edge_id = "edge:1" if rel_type == "SUPPORTED_BY" else "edge:2"
+        return [
+            {
+                "id": "actor:2",
+                "labels": ["Actor"],
+                "properties": {"name": "Agency", "source_id": "doc:1"},
+                "distance": 2,
+                "path": [node_id, intermediary, "actor:2"],
+                "path_relationships": [
+                    {
+                        "id": edge_id,
+                        "type": rel_type,
+                        "start_node_id": node_id,
+                        "end_node_id": intermediary,
+                        "properties": {"source_id": "doc:1"},
+                    }
+                ],
+            }
+        ]
+
+
 def test_natural_language_query_uses_semantic_search_not_gremlin():
     store = Store()
     adapter = HugeGraphContextAdapter(
@@ -108,6 +135,9 @@ def test_natural_language_query_uses_semantic_search_not_gremlin():
     assert results[0]["score"] == 0.91
     assert results[0]["content"] == "A sourced claim"
     assert results[0]["metadata"]["sources"] == ["doc:1"]
+    assert results[0]["metadata"]["evidence_values"] == [
+        "A quote is evidence, not a source id"
+    ]
     assert results[0]["metadata"]["time_constraints"] == ["2026-01-02"]
 
 
@@ -120,7 +150,7 @@ def test_neighbors_preserve_path_direction_and_edge_evidence():
 
     results = adapter.get_neighbors("claim:1", hops=2)
 
-    # One call per configured relationship type; duplicate entity is removed.
+    # Exact duplicate paths from separate relationship filters are collapsed.
     assert len(store.neighbor_calls) == 2
     assert len(results) == 1
     related = results[0]
@@ -130,6 +160,26 @@ def test_neighbors_preserve_path_direction_and_edge_evidence():
     assert [item["direction"] for item in related["relationships"]] == ["out", "out"]
     assert related["relationships"][0]["properties"]["quote"] == "source quote"
     assert related["metadata"]["sources"] == ["https://source.invalid"]
+
+
+def test_neighbors_keep_distinct_paths_to_the_same_entity():
+    store = MultiPathStore()
+    adapter = HugeGraphContextAdapter(
+        store,
+        relationship_types=["SUPPORTED_BY", "INVOLVES"],
+    )
+
+    results = adapter.get_neighbors("claim:1", hops=2)
+
+    assert len(results) == 2
+    assert {tuple(result["path"]) for result in results} == {
+        ("claim:1", "event:1", "actor:2"),
+        ("claim:1", "event:2", "actor:2"),
+    }
+    assert {result["relationships"][0]["type"] for result in results} == {
+        "SUPPORTED_BY",
+        "INVOLVES",
+    }
 
 
 def test_explicit_gremlin_and_path_are_separate_operations():
