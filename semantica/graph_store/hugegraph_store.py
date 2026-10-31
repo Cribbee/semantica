@@ -1,5 +1,17 @@
-"""Compatibility import for the modular HugeGraph backend."""
+"""Compatibility imports for the modular HugeGraph backend."""
 
-from .hugegraph import HUGEGRAPH_AVAILABLE, HugeGraphStore
+from .hugegraph import (
+    HUGEGRAPH_AVAILABLE,
+    OLAP_ALGORITHMS,
+    HugeGraphAlgorithm,
+    HugeGraphAnalytics,
+    HugeGraphStore,
+)
 
-__all__ = ["HugeGraphStore", "HUGEGRAPH_AVAILABLE"]
+__all__ = [
+    "HugeGraphStore",
+    "HUGEGRAPH_AVAILABLE",
+    "HugeGraphAnalytics",
+    "HugeGraphAlgorithm",
+    "OLAP_ALGORITHMS",
+]

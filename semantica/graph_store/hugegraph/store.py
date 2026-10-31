@@ -2,12 +2,17 @@
 
 from __future__ import annotations
 
+import base64
+from ipaddress import ip_address
 from typing import Any, Optional, Tuple, Union
+from urllib.parse import urlparse
 
 from ...utils.exceptions import ProcessingError, ValidationError
 from ...utils.logging import get_logger
+from .analytics import HugeGraphAnalytics, HugeGraphOlapMixin, RestExecutor
 from .crud import HugeGraphCrudMixin
 from .query import HugeGraphQueryMixin
+from .safety import HugeGraphSafetyMixin
 from .schema import HugeGraphSchemaMixin
 from .utils import GremlinExecutor, _as_bool, _call, _positive_int
 
@@ -21,6 +26,8 @@ except (ImportError, OSError):  # pragma: no cover - dependency test.
 
 
 class HugeGraphStore(
+    HugeGraphSafetyMixin,
+    HugeGraphOlapMixin,
     HugeGraphSchemaMixin,
     HugeGraphCrudMixin,
     HugeGraphQueryMixin,
@@ -55,8 +62,10 @@ class HugeGraphStore(
         graphspace: Optional[str] = None,
         timeout: Optional[Union[int, float, Tuple[float, float]]] = None,
         read_only: bool = False,
+        allow_insecure_auth: bool = False,
         client: Optional[Any] = None,
         gremlin_executor: Optional[GremlinExecutor] = None,
+        rest_executor: Optional[RestExecutor] = None,
         **config: Any,
     ) -> None:
         self.logger = get_logger("hugegraph_store")
@@ -69,6 +78,12 @@ class HugeGraphStore(
             or "http://localhost:8080"
         )
         self.uri = configured_uri.rstrip("/")
+        parsed_uri = urlparse(self.uri)
+        if parsed_uri.scheme not in {"http", "https"} or not parsed_uri.netloc:
+            raise ValidationError(
+                "HugeGraph uri must be an absolute http:// or https:// URL"
+            )
+
         self.graph_name = graph or config.get("graph") or "hugegraph"
         self.user = user if user is not None else config.get("user", "admin")
         self.password = (
@@ -76,6 +91,25 @@ class HugeGraphStore(
             if password is not None
             else config.get("pwd", config.get("password", "hugegraph"))
         )
+        if self.password and not self.user:
+            raise ValidationError(
+                "HugeGraph password was provided without a user name"
+            )
+
+        self.allow_insecure_auth = _as_bool(
+            config.get("allow_insecure_auth", allow_insecure_auth)
+        )
+        if (
+            parsed_uri.scheme == "http"
+            and self.user
+            and not self.allow_insecure_auth
+            and not self._is_loopback_host(parsed_uri.hostname)
+        ):
+            raise ValidationError(
+                "Refusing to send HugeGraph credentials over plain HTTP to a "
+                "non-loopback host; use HTTPS or set allow_insecure_auth=True"
+            )
+
         self.graphspace = (
             graphspace if graphspace is not None else config.get("graphspace")
         )
@@ -110,6 +144,27 @@ class HugeGraphStore(
         self._client = client
         self._owns_client = False
         self._gremlin_executor = gremlin_executor
+        self._rest_executor = rest_executor
+        self.analytics = HugeGraphAnalytics(self)
+
+    @staticmethod
+    def _is_loopback_host(hostname: Optional[str]) -> bool:
+        if not hostname:
+            return False
+        normalized = hostname.strip().lower()
+        if normalized == "localhost":
+            return True
+        try:
+            return ip_address(normalized).is_loopback
+        except ValueError:
+            return False
+
+    def _authorization_header(self) -> Optional[str]:
+        if not self.user:
+            return None
+        credentials = f"{self.user}:{self.password}".encode("utf-8")
+        token = base64.b64encode(credentials).decode("ascii")
+        return f"Basic {token}"
 
     def _timeout_tuple(self) -> Tuple[float, float]:
         if isinstance(self.timeout, tuple) and len(self.timeout) == 2:
@@ -152,7 +207,11 @@ class HugeGraphStore(
         return True
 
     def close(self) -> None:
-        if self._client is not None and hasattr(self._client, "close"):
+        # A caller-injected client can be shared with other components; only
+        # close resources created by this store instance.
+        if not self._owns_client or self._client is None:
+            return
+        if hasattr(self._client, "close"):
             try:
                 self._client.close()
             except Exception as exc:
@@ -160,9 +219,8 @@ class HugeGraphStore(
                     "Failed to close HugeGraph client cleanly: %s",
                     exc,
                 )
-        if self._owns_client:
-            self._client = None
-            self._owns_client = False
+        self._client = None
+        self._owns_client = False
 
     def _client_instance(self) -> Any:
         if self._client is None:
