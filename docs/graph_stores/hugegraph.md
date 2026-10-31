@@ -116,6 +116,41 @@ Nodes are normalized as `{id, labels, properties}` and relationships as
 `{id, type, start_node_id, end_node_id, properties}`. HugeGraph edge IDs are kept
 opaque, so multiple edges and sort-key-generated IDs are not rewritten.
 
+## ContextRetriever and hybrid GraphRAG
+
+`HugeGraphContextAdapter` gives `ContextRetriever` a semantic `query(question)`
+operation while keeping raw Gremlin under `execute_query()`. It expands only the
+selected local subgraph and preserves path, direction, source, time, quote, and
+other relationship evidence fields.
+
+```python
+from semantica.context.context_retriever import ContextRetriever
+from semantica.context.hugegraph_context import HugeGraphContextAdapter
+
+knowledge_graph = HugeGraphContextAdapter(
+    store,
+    node_labels=["Claim", "Actor", "Event"],
+    relationship_types=["SUPPORTED_BY", "INVOLVES", "MENTIONS"],
+    max_hops=3,
+)
+
+pure_graph = ContextRetriever(
+    knowledge_graph=knowledge_graph,
+    hybrid_alpha=1.0,
+    max_expansion_hops=3,
+)
+hybrid = ContextRetriever(
+    knowledge_graph=knowledge_graph,
+    vector_store=vector_store,
+    hybrid_alpha=0.6,
+    max_expansion_hops=3,
+)
+```
+
+The adapter is a read-through view. It does not re-extract entities or create a
+second business graph; a vector store or text index can be supplied separately
+for Semantica's existing hybrid retrieval and ranking path.
+
 ## Test scope
 
 The unit suite uses a behaviorally accurate fake `pyhugegraph` client and covers
