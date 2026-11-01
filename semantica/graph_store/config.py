@@ -126,6 +126,14 @@ class GraphStoreConfig:
             "GRAPH_STORE_NEO4J_PASSWORD": "neo4j_password",
             "GRAPH_STORE_NEO4J_DATABASE": "neo4j_database",
             "GRAPH_STORE_NEO4J_ENCRYPTED": "neo4j_encrypted",
+            # HugeGraph settings
+            "GRAPH_STORE_HUGEGRAPH_URI": "hugegraph_uri",
+            "GRAPH_STORE_HUGEGRAPH_GRAPH": "hugegraph_graph",
+            "GRAPH_STORE_HUGEGRAPH_GRAPHSPACE": "hugegraph_graphspace",
+            "GRAPH_STORE_HUGEGRAPH_USER": "hugegraph_user",
+            "GRAPH_STORE_HUGEGRAPH_PASSWORD": "hugegraph_password",
+            "GRAPH_STORE_HUGEGRAPH_TIMEOUT": "hugegraph_timeout",
+            "GRAPH_STORE_HUGEGRAPH_READ_ONLY": "hugegraph_read_only",
             # FalkorDB settings
             "GRAPH_STORE_FALKORDB_HOST": "falkordb_host",
             "GRAPH_STORE_FALKORDB_PORT": "falkordb_port",
@@ -153,6 +161,7 @@ class GraphStoreConfig:
                     "batch_size",
                     "timeout",
                     "max_retries",
+                    "hugegraph_timeout",
                     "falkordb_port",
                     "neptune_port",
                 ]:
@@ -164,6 +173,7 @@ class GraphStoreConfig:
                         )
                 elif config_key in [
                     "neo4j_encrypted",
+                    "hugegraph_read_only",
                     "neptune_iam_auth",
                     "neptune_use_ssl",
                 ]:
@@ -190,6 +200,14 @@ class GraphStoreConfig:
             "neo4j_password": "password",
             "neo4j_database": "neo4j",
             "neo4j_encrypted": False,
+            # HugeGraph defaults
+            "hugegraph_uri": "http://localhost:8080",
+            "hugegraph_graph": "hugegraph",
+            "hugegraph_graphspace": None,
+            "hugegraph_user": "admin",
+            "hugegraph_password": "hugegraph",
+            "hugegraph_timeout": 30,
+            "hugegraph_read_only": False,
             # FalkorDB defaults
             "falkordb_host": "localhost",
             "falkordb_port": 6379,
@@ -291,6 +309,18 @@ class GraphStoreConfig:
             "encrypted": self._config.get("neo4j_encrypted"),
         }
 
+    def get_hugegraph_config(self) -> Dict[str, Any]:
+        """Get Apache HugeGraph-specific configuration."""
+        return {
+            "uri": self._config.get("hugegraph_uri"),
+            "graph": self._config.get("hugegraph_graph"),
+            "graphspace": self._config.get("hugegraph_graphspace"),
+            "user": self._config.get("hugegraph_user"),
+            "password": self._config.get("hugegraph_password"),
+            "timeout": self._config.get("hugegraph_timeout"),
+            "read_only": self._config.get("hugegraph_read_only"),
+        }
+
     def get_falkordb_config(self) -> Dict[str, Any]:
         """
         Get FalkorDB-specific configuration.
@@ -344,3 +374,4 @@ class GraphStoreConfig:
 
 # Global configuration instance
 graph_store_config = GraphStoreConfig()
+

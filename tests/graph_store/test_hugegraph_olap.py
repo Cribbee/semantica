@@ -112,6 +112,23 @@ def test_task_lifecycle_and_capabilities_are_normalized():
     assert {"shortest_path", "k_out", "personal_rank"} <= traversers
 
 
+def test_task_operations_reuse_client_when_options_are_supported():
+    class TaskManager:
+        def cancel_task(self, task_id):
+            return {"task_id": task_id, "task_status": "CANCELLING"}
+
+        def delete_task(self, task_id):
+            return {"deleted": task_id}
+
+    class Client:
+        def task(self):
+            return TaskManager()
+
+    store = HugeGraphStore(client=Client())
+    assert store.cancel_olap_task(42)["task_status"] == "CANCELLING"
+    assert store.delete_olap_task(42) == {"deleted": 42}
+
+
 def test_failed_task_surfaces_server_error():
     def executor(method, url, payload):
         del url, payload
@@ -161,3 +178,4 @@ def test_transport_validation_and_injected_client_ownership():
     client = SharedClient()
     HugeGraphStore(client=client).close()
     assert client.closed is False
+

@@ -295,7 +295,9 @@ class QueryEngine:
         import hashlib
 
         key_str = f"{query}:{str(parameters)}"
-        return hashlib.md5(key_str.encode()).hexdigest()  # nosec B324 - cache key, not security-sensitive
+        return hashlib.md5(
+            key_str.encode()
+        ).hexdigest()  # nosec B324 - cache key, not security-sensitive
 
     def clear_cache(self) -> None:
         """Clear query cache."""
@@ -399,7 +401,9 @@ class GraphAnalytics:
         else:
             match = "MATCH (n)"
 
-        type_filter = f":{sanitize_identifier(rel_type, 'relationship type')}" if rel_type else ""
+        type_filter = (
+            f":{sanitize_identifier(rel_type, 'relationship type')}" if rel_type else ""
+        )
 
         if direction == "out":
             query = f"""
@@ -532,7 +536,7 @@ class GraphStore:
     Main graph store interface.
 
     Provides a unified interface for working with property graph databases,
-    supporting Neo4j and FalkorDB backends.
+    supporting Neo4j, HugeGraph, FalkorDB, Neptune, and AGE backends.
     """
 
     def __init__(
@@ -544,7 +548,7 @@ class GraphStore:
         Initialize graph store.
 
         Args:
-            backend: Backend type ("neo4j", "falkordb")
+            backend: Backend type, including "neo4j" or "hugegraph"
             **config: Backend-specific configuration
         """
         self.logger = get_logger("graph_store")
@@ -581,6 +585,13 @@ class GraphStore:
             neo4j_config = graph_store_config.get_neo4j_config()
             neo4j_config.update(self.config)
             self._store_backend = Neo4jStore(**neo4j_config)
+
+        elif self.backend in {"hugegraph", "apache_hugegraph"}:
+            from .hugegraph_store import HugeGraphStore
+
+            hugegraph_config = graph_store_config.get_hugegraph_config()
+            hugegraph_config.update(self.config)
+            self._store_backend = HugeGraphStore(**hugegraph_config)
 
         elif self.backend == "falkordb":
             from .falkordb_store import FalkorDBStore
@@ -714,10 +725,16 @@ class GraphStore:
         internal id to a different node.
         """
         return self._manager.relationships.create(
-            self._app_node_id_map.get(start_node_id, start_node_id)
-            if isinstance(start_node_id, str) else start_node_id,
-            self._app_node_id_map.get(end_node_id, end_node_id)
-            if isinstance(end_node_id, str) else end_node_id,
+            (
+                self._app_node_id_map.get(start_node_id, start_node_id)
+                if isinstance(start_node_id, str)
+                else start_node_id
+            ),
+            (
+                self._app_node_id_map.get(end_node_id, end_node_id)
+                if isinstance(end_node_id, str)
+                else end_node_id
+            ),
             rel_type,
             properties,
             **options,
@@ -1116,7 +1133,9 @@ class GraphStore:
 
                 entity_hash = hashlib.md5(  # nosec B324 - deterministic entity ID, not security-sensitive
                     f"{entity_text}_{entity_type}".encode()
-                ).hexdigest()[:12]
+                ).hexdigest()[
+                    :12
+                ]
                 entity_id = f"{entity_type.lower()}_{entity_hash}"
 
             if entity_id:
@@ -1221,3 +1240,4 @@ class GraphStore:
     def analytics(self) -> GraphAnalytics:
         """Get analytics engine."""
         return self._manager.analytics
+

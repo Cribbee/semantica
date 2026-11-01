@@ -17,6 +17,7 @@ separate Semantica vector store for hybrid retrieval.
 
 from __future__ import annotations
 
+from collections import deque
 from collections.abc import Iterable, Sequence
 from typing import Any, Dict, List, Optional, Union
 
@@ -72,7 +73,14 @@ def _path_marker(node: Dict[str, Any]) -> tuple[Any, tuple[str, ...], tuple[str,
     path = tuple(str(item) for item in node.get("path") or [])
     relationships = node.get("path_relationships") or []
     relationship_markers = tuple(
-        f"{relationship.get('id')}:{relationship.get('type')}"
+        ":".join(
+            (
+                str(relationship.get("id")),
+                str(relationship.get("type")),
+                str(relationship.get("start_node_id")),
+                str(relationship.get("end_node_id")),
+            )
+        )
         for relationship in relationships
         if isinstance(relationship, dict)
     )
@@ -238,7 +246,13 @@ class HugeGraphContextAdapter:
                 semantic["content"] = raw["content"].strip()
                 semantic["node"]["content"] = raw["content"].strip()
             semantic["score"] = float(raw.get("score", 0.0))
-            semantic["metadata"].update(raw.get("metadata") or {})
+            raw_metadata = raw.get("metadata")
+            normalized_metadata = dict(semantic["metadata"])
+            semantic["metadata"] = {
+                **(dict(raw_metadata) if isinstance(raw_metadata, dict) else {}),
+                **normalized_metadata,
+            }
+            semantic["node"]["properties"] = semantic["metadata"]
             results.append(semantic)
         return results
 
@@ -273,6 +287,103 @@ class HugeGraphContextAdapter:
             "properties": dict(relationship.get("properties") or {}),
         }
 
+    @staticmethod
+    def _neighbor_for_edge(
+        edge: Dict[str, Any],
+        current: NodeId,
+        direction: str,
+    ) -> Optional[NodeId]:
+        start = edge.get("start_node_id")
+        end = edge.get("end_node_id")
+        if direction == "out":
+            return end if start == current else None
+        if direction == "in":
+            return start if end == current else None
+        if start == current:
+            return end
+        if end == current:
+            return start
+        return None
+
+    def _bounded_neighbor_paths(
+        self,
+        node_id: NodeId,
+        *,
+        depth: int,
+        direction: str,
+        relationship_types: Sequence[str],
+        per_node_limit: int,
+        max_paths: int,
+        relationship_properties: Optional[Dict[str, Any]],
+    ) -> List[Dict[str, Any]]:
+        """Enumerate simple bounded paths while preserving parallel evidence."""
+        allowed_types = set(relationship_types)
+        edge_cache: Dict[NodeId, List[Dict[str, Any]]] = {}
+        node_cache: Dict[NodeId, Optional[Dict[str, Any]]] = {}
+        queue = deque([(node_id, (node_id,), tuple())])
+        seen_paths: set[
+            tuple[Any, tuple[str, ...], tuple[str, ...]]
+        ] = set()
+        output: List[Dict[str, Any]] = []
+
+        while queue and len(output) < max_paths:
+            current, path, path_relationships = queue.popleft()
+            if len(path_relationships) >= depth:
+                continue
+            if current not in edge_cache:
+                relationship_options: Dict[str, Any] = {}
+                if relationship_properties is not None:
+                    relationship_options["properties"] = relationship_properties
+                edge_cache[current] = self.store.get_relationships(
+                    node_id=current,
+                    direction=direction,
+                    limit=per_node_limit,
+                    **relationship_options,
+                )
+            edges = sorted(
+                edge_cache[current],
+                key=lambda edge: (
+                    str(edge.get("id")),
+                    str(edge.get("type")),
+                    str(edge.get("start_node_id")),
+                    str(edge.get("end_node_id")),
+                ),
+            )
+            for edge in edges:
+                if allowed_types and edge.get("type") not in allowed_types:
+                    continue
+                neighbor = self._neighbor_for_edge(edge, current, direction)
+                if neighbor is None or neighbor in path:
+                    continue
+                next_path = (*path, neighbor)
+                next_relationships = (*path_relationships, edge)
+                candidate = {
+                    "id": neighbor,
+                    "path": list(next_path),
+                    "path_relationships": list(next_relationships),
+                }
+                marker = _path_marker(candidate)
+                if marker in seen_paths:
+                    continue
+                seen_paths.add(marker)
+                if neighbor not in node_cache:
+                    node_cache[neighbor] = self.store.get_node(neighbor)
+                node = node_cache[neighbor]
+                if node is None:
+                    continue
+                result = {
+                    **dict(node),
+                    "distance": len(next_relationships),
+                    "path": list(next_path),
+                    "path_relationships": list(next_relationships),
+                }
+                output.append(result)
+                if len(output) >= max_paths:
+                    break
+                if len(next_relationships) < depth:
+                    queue.append((neighbor, next_path, next_relationships))
+        return output
+
     def get_neighbors(
         self,
         node_id: NodeId,
@@ -280,39 +391,40 @@ class HugeGraphContextAdapter:
         **options: Any,
     ) -> List[Dict[str, Any]]:
         """Return entities from one bounded, provenance-rich local subgraph."""
-        depth = max(
-            1,
-            int(options.pop("depth", hops or self.max_hops)),
-        )
-        direction = options.pop("direction", self.direction)
+        depth = max(1, int(options.pop("depth", hops or self.max_hops)))
+        direction = str(options.pop("direction", self.direction)).lower()
+        if direction not in {"in", "out", "both"}:
+            raise ValidationError(
+                "Unsupported HugeGraph context direction: " f"{direction!r}"
+            )
         relationship_types = options.pop(
             "relationship_types",
             self.relationship_types,
         )
-
-        raw_neighbors: List[Dict[str, Any]] = []
-        if relationship_types:
-            seen: set[tuple[Any, tuple[str, ...], tuple[str, ...]]] = set()
-            for rel_type in relationship_types:
-                nodes = self.store.get_neighbors(
-                    node_id,
-                    rel_type=rel_type,
-                    direction=direction,
-                    depth=depth,
-                    **options,
-                )
-                for node in nodes:
-                    marker = _path_marker(node)
-                    if marker not in seen:
-                        seen.add(marker)
-                        raw_neighbors.append(node)
-        else:
-            raw_neighbors = self.store.get_neighbors(
-                node_id,
-                direction=direction,
-                depth=depth,
-                **options,
+        if isinstance(relationship_types, str):
+            relationship_types = [relationship_types]
+        per_node_limit = max(1, int(options.pop("per_node_limit", 1000)))
+        max_paths = max(1, int(options.pop("max_paths", 1000)))
+        relationship_properties = options.pop(
+            "relationship_properties",
+            options.pop("properties", None),
+        )
+        if relationship_properties is not None and not isinstance(
+            relationship_properties, dict
+        ):
+            raise ValidationError(
+                "relationship_properties must be a property mapping"
             )
+
+        raw_neighbors = self._bounded_neighbor_paths(
+            node_id,
+            depth=depth,
+            direction=direction,
+            relationship_types=list(relationship_types or []),
+            per_node_limit=per_node_limit,
+            max_paths=max_paths,
+            relationship_properties=relationship_properties,
+        )
 
         output: List[Dict[str, Any]] = []
         for raw in raw_neighbors:
@@ -385,3 +497,4 @@ class HugeGraphContextAdapter:
         **kwargs: Any,
     ) -> List[Dict[str, Any]]:
         return self.store.get_relationships(*args, **kwargs)
+

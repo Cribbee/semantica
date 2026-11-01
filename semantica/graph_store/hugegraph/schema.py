@@ -26,9 +26,7 @@ class HugeGraphSchemaMixin:
                 ("get_schema", "getSchema"),
             )
         except Exception as exc:
-            raise ProcessingError(
-                f"Failed to read HugeGraph schema: {exc}"
-            ) from exc
+            raise ProcessingError(f"Failed to read HugeGraph schema: {exc}") from exc
         plain = _plain(value)
         return dict(plain) if isinstance(plain, dict) else {"schema": plain}
 
@@ -124,15 +122,9 @@ class HugeGraphSchemaMixin:
                         f"Unsupported id_strategy for {name}: {strategy}"
                     )
                 builder = _chain(builder, id_methods[strategy])
-                properties = [
-                    str(item) for item in spec.get("properties", []) or []
-                ]
-                nullable = [
-                    str(item) for item in spec.get("nullable_keys", []) or []
-                ]
-                primary = [
-                    str(item) for item in spec.get("primary_keys", []) or []
-                ]
+                properties = [str(item) for item in spec.get("properties", []) or []]
+                nullable = [str(item) for item in spec.get("nullable_keys", []) or []]
+                primary = [str(item) for item in spec.get("primary_keys", []) or []]
                 if properties:
                     builder = _chain(builder, ("properties",), *properties)
                 if nullable:
@@ -172,15 +164,9 @@ class HugeGraphSchemaMixin:
                     name,
                 )
                 builder = _chain(builder, ("link",), source, target)
-                properties = [
-                    str(item) for item in spec.get("properties", []) or []
-                ]
-                nullable = [
-                    str(item) for item in spec.get("nullable_keys", []) or []
-                ]
-                sort_keys = [
-                    str(item) for item in spec.get("sort_keys", []) or []
-                ]
+                properties = [str(item) for item in spec.get("properties", []) or []]
+                nullable = [str(item) for item in spec.get("nullable_keys", []) or []]
+                sort_keys = [str(item) for item in spec.get("sort_keys", []) or []]
                 if properties:
                     builder = _chain(builder, ("properties",), *properties)
                 if nullable:
@@ -226,9 +212,7 @@ class HugeGraphSchemaMixin:
         except (ValidationError, ProcessingError):
             raise
         except Exception as exc:
-            raise ProcessingError(
-                f"Failed to apply HugeGraph schema: {exc}"
-            ) from exc
+            raise ProcessingError(f"Failed to apply HugeGraph schema: {exc}") from exc
         return counts
 
     def create_index(
@@ -240,10 +224,7 @@ class HugeGraphSchemaMixin:
     ) -> bool:
         self._ensure_write("create_index")
         label = _identifier(label, "label")
-        fields = [
-            str(item)
-            for item in options.get("fields", []) or [property_name]
-        ]
+        fields = [str(item) for item in options.get("fields", []) or [property_name]]
         if not fields or any(not item or item == "None" for item in fields):
             raise ValidationError(
                 "HugeGraph index requires at least one property field"
@@ -267,9 +248,7 @@ class HugeGraphSchemaMixin:
             "UNIQUE": ("unique",),
         }
         if normalized_type not in type_methods:
-            raise ValidationError(
-                f"Unsupported HugeGraph index type: {index_type}"
-            )
+            raise ValidationError(f"Unsupported HugeGraph index type: {index_type}")
 
         try:
             builder = _call(
@@ -277,9 +256,7 @@ class HugeGraphSchemaMixin:
                 ("index_label", "indexLabel"),
                 index_name,
             )
-            base_type = str(
-                options.get("base_type", "VERTEX_LABEL")
-            ).upper()
+            base_type = str(options.get("base_type", "VERTEX_LABEL")).upper()
             if base_type == "EDGE_LABEL":
                 builder = _chain(builder, ("on_e", "onE"), label)
             else:
@@ -295,3 +272,4 @@ class HugeGraphSchemaMixin:
             raise ProcessingError(
                 f"Failed to create HugeGraph index {index_name}: {exc}"
             ) from exc
+

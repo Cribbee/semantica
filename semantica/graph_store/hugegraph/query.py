@@ -34,6 +34,7 @@ class HugeGraphQueryMixin:
         query: str,
         parameters: Optional[Dict[str, Any]] = None,
     ) -> Dict[str, Any]:
+        base_uri = self._validated_http_uri()
         alias = (
             f"{self.graphspace}-{self.graph_name}"
             if self.graphspace
@@ -57,7 +58,7 @@ class HugeGraphQueryMixin:
             token = base64.b64encode(credentials).decode("ascii")
             headers["Authorization"] = f"Basic {token}"
         request = Request(
-            f"{self.uri}/gremlin",
+            f"{base_uri}/gremlin",
             data=json.dumps(
                 payload,
                 ensure_ascii=False,
@@ -72,9 +73,8 @@ class HugeGraphQueryMixin:
                 timeout=self._timeout_tuple()[1],
             ) as response:
                 raw = response.read()
-                if (
-                    response.headers.get("Content-Encoding") == "gzip"
-                    or raw.startswith(b"\x1f\x8b")
+                if response.headers.get("Content-Encoding") == "gzip" or raw.startswith(
+                    b"\x1f\x8b"
                 ):
                     raw = gzip.decompress(raw)
                 parsed = json.loads(raw.decode("utf-8")) if raw else {}
@@ -85,22 +85,15 @@ class HugeGraphQueryMixin:
             OSError,
             ValueError,
         ) as exc:
-            raise ProcessingError(
-                f"HugeGraph Gremlin request failed: {exc}"
-            ) from exc
+            raise ProcessingError(f"HugeGraph Gremlin request failed: {exc}") from exc
         if not isinstance(parsed, dict):
             raise ProcessingError(
                 "HugeGraph Gremlin endpoint returned a non-object response"
             )
         status = parsed.get("status")
-        if (
-            isinstance(status, dict)
-            and status.get("code") not in {None, 200}
-        ):
+        if isinstance(status, dict) and status.get("code") not in {None, 200}:
             message = status.get("message") or status
-            raise ProcessingError(
-                f"HugeGraph rejected Gremlin query: {message}"
-            )
+            raise ProcessingError(f"HugeGraph rejected Gremlin query: {message}")
         return parsed
 
     def _run_gremlin(
@@ -109,11 +102,18 @@ class HugeGraphQueryMixin:
         parameters: Optional[Dict[str, Any]] = None,
     ) -> Any:
         if not isinstance(query, str) or not query.strip():
-            raise ValidationError(
-                "Gremlin query must be a nonempty string"
-            )
+            raise ValidationError("Gremlin query must be a nonempty string")
         if self._gremlin_executor is not None:
             return self._gremlin_executor(query, parameters)
+        if not parameters:
+            # The client returns the result object, rather than the full envelope.
+            # Its current exec API does not expose Gremlin bindings.
+            try:
+                return {"result": self._manager("gremlin").exec(query)}
+            except Exception as exc:
+                raise ProcessingError(
+                    f"HugeGraph Gremlin request failed: {exc}"
+                ) from exc
         return self._http_gremlin(query, parameters)
 
     def execute_query(
@@ -180,9 +180,7 @@ class HugeGraphQueryMixin:
                         neighbor = (
                             end
                             if start == current
-                            else start
-                            if end == current
-                            else None
+                            else start if end == current else None
                         )
                     if neighbor is None or neighbor in visited:
                         continue
@@ -231,12 +229,28 @@ class HugeGraphQueryMixin:
         nested = value.get("path")
         if isinstance(nested, dict):
             value = nested
+        elif isinstance(nested, list):
+            if not nested:
+                return None
+            nodes = [
+                (
+                    _node_dict(item)
+                    if isinstance(item, dict) or hasattr(item, "id")
+                    else self.get_node(item)
+                    or {"id": item, "labels": [], "properties": {}}
+                )
+                for item in nested
+            ]
+            return {
+                "length": max(0, len(nodes) - 1),
+                "nodes": nodes,
+                "relationships": [],
+                "start_node_id": start_node_id,
+                "end_node_id": end_node_id,
+                "native_path_ids": list(nested),
+            }
         raw_nodes = value.get("vertices") or value.get("nodes") or []
-        raw_edges = (
-            value.get("edges")
-            or value.get("relationships")
-            or []
-        )
+        raw_edges = value.get("edges") or value.get("relationships") or []
         nodes = [_node_dict(item) for item in raw_nodes]
         relationships = [_edge_dict(item) for item in raw_edges]
         if not nodes and value.get("vertex_ids"):
@@ -283,16 +297,27 @@ class HugeGraphQueryMixin:
                     end_node_id,
                     max_depth,
                 )
-                return self._normalize_path(
+                normalized = self._normalize_path(
                     raw,
                     start_node_id,
                     end_node_id,
                 )
+                if normalized is None:
+                    return None
+                if (
+                    normalized.get("relationships")
+                    or len(normalized.get("nodes", [])) <= 1
+                    or options.get("native_only", False)
+                ):
+                    return normalized
+                self.logger.debug(
+                    "Native HugeGraph path omitted edge records; using bounded "
+                    "REST traversal to preserve relationship evidence"
+                )
             except Exception as exc:
                 if options.get("native_only", False):
                     raise ProcessingError(
-                        "HugeGraph shortest-path request failed: "
-                        f"{exc}"
+                        "HugeGraph shortest-path request failed: " f"{exc}"
                     ) from exc
                 self.logger.warning(
                     "Native HugeGraph shortest path failed; using bounded "
@@ -332,11 +357,7 @@ class HugeGraphQueryMixin:
                     neighbor = start if end == current else None
                 else:
                     neighbor = (
-                        end
-                        if start == current
-                        else start
-                        if end == current
-                        else None
+                        end if start == current else start if end == current else None
                     )
                 if neighbor is None or neighbor in parents:
                     continue
@@ -431,25 +452,16 @@ class HugeGraphQueryMixin:
                 limit=candidate_limit,
             )
 
-        text_properties = (
-            options.get("text_properties")
-            or self.search_properties
-        )
+        text_properties = options.get("text_properties") or self.search_properties
         if isinstance(text_properties, str):
             text_properties = [
-                item.strip()
-                for item in text_properties.split(",")
-                if item.strip()
+                item.strip() for item in text_properties.split(",") if item.strip()
             ]
 
         results: List[Dict[str, Any]] = []
         for node in candidates:
             props = dict(node.get("properties") or {})
-            selected = [
-                props.get(key)
-                for key in text_properties
-                if key in props
-            ]
+            selected = [props.get(key) for key in text_properties if key in props]
             values = list(_text_fragments(selected or props))
             score = _lexical_score(query, values)
             if query.strip() and score <= 0.0:
@@ -520,9 +532,7 @@ class HugeGraphQueryMixin:
             "node_count": "g.V().count().next()",
             "relationship_count": "g.E().count().next()",
             "label_counts": "g.V().groupCount().by(label).next()",
-            "relationship_type_counts": (
-                "g.E().groupCount().by(label).next()"
-            ),
+            "relationship_type_counts": ("g.E().groupCount().by(label).next()"),
         }
         output: Dict[str, Any] = {}
         for key, script in scripts.items():
@@ -539,3 +549,4 @@ class HugeGraphQueryMixin:
                 )
                 output[key] = 0 if key.endswith("count") else {}
         return output
+

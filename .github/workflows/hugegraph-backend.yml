@@ -1,0 +1,47 @@
+name: HugeGraph backend
+
+on:
+  pull_request:
+    branches:
+      - master
+      - feat/hugegraph-store-backend
+    paths:
+      - "semantica/graph_store/**"
+      - "semantica/context/hugegraph*.py"
+      - "tests/graph_store/test_hugegraph*.py"
+      - "tests/context/test_hugegraph*.py"
+      - "pyproject.toml"
+      - "docs/graph_stores/hugegraph*.md"
+      - ".github/workflows/hugegraph-backend.yml"
+  push:
+    branches:
+      - feat/hugegraph-store-backend
+      - feat/hugegraph-context-retrieval
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.12"
+      - name: Install pinned core test environment
+        run: |
+          pip install -r .github/requirements/pep517-build.txt --require-hashes
+          pip install --no-deps --no-build-isolation -e .
+          pip install -r .github/requirements/base-deps.txt --require-hashes
+          pip install -r .github/requirements/pytest-tool.txt --require-hashes
+      - name: Verify HugeGraph backend contracts
+        run: |
+          python -m compileall -q semantica/graph_store tests/graph_store/test_hugegraph_store.py
+          python -m pytest -q tests/graph_store/test_hugegraph_store.py tests/graph_store/test_hugegraph_olap.py tests/graph_store/test_hugegraph_safe_replace.py
+          if [ -f tests/context/test_hugegraph_context.py ]; then
+            python -m compileall -q semantica/context/hugegraph_context.py tests/context/test_hugegraph_context.py
+            python -m pytest -q tests/context/test_hugegraph_context.py
+          fi
+          python -m pytest -q tests/context/test_hugegraph_integration_chain.py
+

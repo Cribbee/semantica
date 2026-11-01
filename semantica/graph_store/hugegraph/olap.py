@@ -195,6 +195,8 @@ class HugeGraphOlapMixin:
         )
 
     def cancel_olap_task(self, task_id: TaskId) -> Dict[str, Any]:
+        if self._rest_executor is None and not self.config.get("graph_api_root"):
+            return self._task_record(self._manager("task").cancel_task(task_id))
         encoded = quote(str(task_id), safe="")
         response = self._rest_request(
             "PUT",
@@ -204,6 +206,12 @@ class HugeGraphOlapMixin:
         return self._task_record(response)
 
     def delete_olap_task(self, task_id: TaskId, *, force: bool = False) -> Any:
+        if (
+            not force
+            and self._rest_executor is None
+            and not self.config.get("graph_api_root")
+        ):
+            return self._manager("task").delete_task(task_id)
         encoded = quote(str(task_id), safe="")
         query = urlencode({"force": str(bool(force)).lower()})
         return self._rest_request(
@@ -274,3 +282,4 @@ class HugeGraphOlapMixin:
             "result": self._extract_task_result(task),
             "capability": self.get_olap_algorithm(normalized),
         }
+

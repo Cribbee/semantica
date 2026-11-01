@@ -72,10 +72,7 @@ class HugeGraphStore(
         self.config = config
 
         configured_uri = (
-            uri
-            or config.get("url")
-            or config.get("uri")
-            or "http://localhost:8080"
+            uri or config.get("url") or config.get("uri") or "http://localhost:8080"
         )
         self.uri = configured_uri.rstrip("/")
         parsed_uri = urlparse(self.uri)
@@ -172,8 +169,27 @@ class HugeGraphStore(
         seconds = float(self.timeout)
         return (min(1.0, seconds), seconds)
 
+    def _validated_http_uri(self) -> str:
+        """Validate scheme and protect Basic credentials on remote endpoints."""
+        parsed = urlparse(self.uri)
+        if parsed.scheme not in {"http", "https"} or not parsed.hostname:
+            raise ValidationError("HugeGraph URI must be an absolute http or https URL")
+        is_loopback = self._is_loopback_host(parsed.hostname)
+        if (
+            parsed.scheme == "http"
+            and self.user
+            and not is_loopback
+            and not self.allow_insecure_auth
+        ):
+            raise ValidationError(
+                "Refusing to send HugeGraph Basic credentials over remote HTTP; "
+                "use HTTPS or a loopback endpoint"
+            )
+        return self.uri
+
     def connect(self, **options: Any) -> bool:
         if self._client is None:
+            self._validated_http_uri()
             if not HUGEGRAPH_AVAILABLE or PyHugeClient is None:
                 raise ProcessingError(
                     "HugeGraph support requires the optional "
@@ -236,3 +252,4 @@ class HugeGraphStore(
                 f"HugeGraphStore is read-only; {operation} is allowed only "
                 "on an isolated test graph"
             )
+

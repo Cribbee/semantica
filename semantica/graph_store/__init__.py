@@ -140,6 +140,7 @@ from .graph_store import (
     QueryEngine,
     RelationshipManager,
 )
+from .hugegraph_store import HUGEGRAPH_AVAILABLE, HugeGraphStore
 from .methods import (
     create_node,
     create_nodes,
@@ -169,6 +170,9 @@ __all__ = [
     "RelationshipManager",
     "QueryEngine",
     "GraphAnalytics",
+    # Apache HugeGraph
+    "HugeGraphStore",
+    "HUGEGRAPH_AVAILABLE",
     # Neo4j
     "Neo4jStore",
     "Neo4jDriver",
@@ -208,3 +212,4 @@ __all__ = [
     "MethodRegistry",
     "method_registry",
 ]
+

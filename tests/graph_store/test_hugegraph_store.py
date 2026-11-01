@@ -4,8 +4,9 @@ from dataclasses import dataclass
 
 import pytest
 
+from semantica.graph_store.graph_store import GraphStore
 from semantica.graph_store.hugegraph_store import HugeGraphStore
-from semantica.utils.exceptions import ValidationError
+from semantica.utils.exceptions import ProcessingError, ValidationError
 
 
 @dataclass
@@ -369,15 +370,15 @@ def test_bounded_neighbors_and_filtered_shortest_path_preserve_path():
         direction="out",
         depth=2,
     )
-    assert [
-        (node["id"], node["distance"])
-        for node in neighbors
-    ] == [(b["id"], 1), (c["id"], 2)]
+    assert [(node["id"], node["distance"]) for node in neighbors] == [
+        (b["id"], 1),
+        (c["id"], 2),
+    ]
     assert neighbors[-1]["path"] == [a["id"], b["id"], c["id"]]
-    assert [
-        edge["type"]
-        for edge in neighbors[-1]["path_relationships"]
-    ] == ["KNOWS", "KNOWS"]
+    assert [edge["type"] for edge in neighbors[-1]["path_relationships"]] == [
+        "KNOWS",
+        "KNOWS",
+    ]
 
     path = subject.shortest_path(
         a["id"], c["id"], rel_type="KNOWS", direction="out", max_depth=3
@@ -509,19 +510,165 @@ def test_apply_schema_and_create_index_use_explicit_hugegraph_builders():
     }
     calls = client.schema_manager.calls
     assert any(
-        call[:2] == ("property", "name")
-        and call[2] in {"as_text", "asText"}
+        call[:2] == ("property", "name") and call[2] in {"as_text", "asText"}
         for call in calls
     )
     assert any(
         call[:2] == ("vertex", "Actor")
-        and call[2]
-        in {"use_customize_string_id", "useCustomizeStringId"}
+        and call[2] in {"use_customize_string_id", "useCustomizeStringId"}
         for call in calls
     )
     assert any(
-        call[:2] == ("edge", "KNOWS")
-        and call[2] in {"multi_times", "multiTimes"}
+        call[:2] == ("edge", "KNOWS") and call[2] in {"multi_times", "multiTimes"}
         for call in calls
     )
     assert ("index", "idx_actor_name", "search", ()) in calls
+
+
+class CloseTrackingClient(Client):
+    def __init__(self):
+        super().__init__()
+        self.closed = False
+
+    def close(self):
+        self.closed = True
+
+
+class FailingReplacementGraphManager(GraphManager):
+    def __init__(self):
+        super().__init__()
+        self.fail_vertex_append = False
+        self.fail_edge_append = False
+        self.vertex_eliminate_calls = 0
+        self.edge_eliminate_calls = 0
+
+    def appendVertex(self, vertex_id, properties):
+        if self.fail_vertex_append:
+            raise RuntimeError("simulated vertex write failure")
+        return super().appendVertex(vertex_id, properties)
+
+    def eliminateVertex(self, vertex_id, properties):
+        self.vertex_eliminate_calls += 1
+        return super().eliminateVertex(vertex_id, properties)
+
+    def appendEdge(self, edge_id, properties):
+        if self.fail_edge_append:
+            raise RuntimeError("simulated edge write failure")
+        return super().appendEdge(edge_id, properties)
+
+    def eliminateEdge(self, edge_id, properties):
+        self.edge_eliminate_calls += 1
+        return super().eliminateEdge(edge_id, properties)
+
+
+class PathIdTraverser(TraverserManager):
+    def shortest_path(self, source_id, target_id, max_depth):
+        self.calls.append(("shortest_path", source_id, target_id, max_depth))
+        return {"path": [source_id, target_id]}
+
+
+def test_graph_store_factory_builds_hugegraph_backend():
+    client = Client()
+    facade = GraphStore(
+        backend="hugegraph",
+        client=client,
+        read_only=True,
+        uri="http://127.0.0.1:8080",
+        graph="existing_graph",
+    )
+
+    assert isinstance(facade._store_backend, HugeGraphStore)
+    assert facade._store_backend.read_only is True
+    assert facade._store_backend.graph_name == "existing_graph"
+    assert facade.connect() is True
+
+
+def test_graph_store_factory_accepts_apache_hugegraph_alias():
+    facade = GraphStore(backend="apache_hugegraph", client=Client())
+    assert isinstance(facade._store_backend, HugeGraphStore)
+
+
+def test_close_keeps_injected_client_open():
+    client = CloseTrackingClient()
+    HugeGraphStore(client=client).close()
+    assert client.closed is False
+
+
+def test_replace_write_failure_does_not_delete_existing_properties():
+    client = Client()
+    graph = FailingReplacementGraphManager()
+    client.graph_manager = graph
+    client.traverser_manager = TraverserManager(graph)
+    subject = HugeGraphStore(client=client)
+    vertex = subject.create_node(["Actor"], {"name": "Alice", "title": "Analyst"})
+    other = subject.create_node(["Actor"], {"name": "Bob"})
+    edge = subject.create_relationship(
+        vertex["id"], other["id"], "KNOWS", {"source": "s1", "quote": "q1"}
+    )
+
+    graph.fail_vertex_append = True
+    with pytest.raises(ProcessingError, match="simulated vertex write failure"):
+        subject.update_node(vertex["id"], {"name": "Alicia"}, merge=False)
+    assert graph.vertex_eliminate_calls == 0
+    assert subject.get_node(vertex["id"])["properties"] == {
+        "name": "Alice",
+        "title": "Analyst",
+    }
+
+    graph.fail_edge_append = True
+    with pytest.raises(ProcessingError, match="simulated edge write failure"):
+        subject.update_relationship(edge["id"], {"source": "s2"}, merge=False)
+    assert graph.edge_eliminate_calls == 0
+    assert subject.get_relationship(edge["id"])["properties"] == {
+        "source": "s1",
+        "quote": "q1",
+    }
+
+
+def test_native_path_id_response_falls_back_to_relationship_evidence():
+    client = Client()
+    client.traverser_manager = PathIdTraverser(client.graph_manager)
+    subject = HugeGraphStore(client=client)
+    source = subject.create_node(["Actor"], {"name": "A"})
+    target = subject.create_node(["Actor"], {"name": "B"})
+    edge = subject.create_relationship(source["id"], target["id"], "KNOWS")
+
+    path = subject.shortest_path(source["id"], target["id"], max_depth=2)
+
+    assert [node["id"] for node in path["nodes"]] == [source["id"], target["id"]]
+    assert [relationship["id"] for relationship in path["relationships"]] == [
+        edge["id"]
+    ]
+
+
+def test_gremlin_rejects_unsupported_scheme_and_remote_plaintext_credentials():
+    with pytest.raises(ValidationError, match="http:// or https://"):
+        HugeGraphStore(uri="ftp://example.com", client=Client())
+
+    with pytest.raises(ValidationError, match="plain HTTP"):
+        HugeGraphStore(
+            uri="http://example.com:8080",
+            user="admin",
+            password="secret",
+            client=Client(),
+        )
+
+
+def test_gremlin_uses_client_when_no_bindings():
+    class Gremlin:
+        def exec(self, query):
+            assert query == "g.V().count()"
+            return {"data": [3]}
+
+    class ClientWithGremlin(Client):
+        def gremlin(self):
+            return Gremlin()
+
+    store = HugeGraphStore(client=ClientWithGremlin())
+    assert store.execute_query("g.V().count()")["records"]
+
+    calls = []
+    store._http_gremlin = lambda query, params: calls.append((query, params)) or {}
+    store.execute_query("g.V(x)", {"x": 1})
+    assert calls == [("g.V(x)", {"x": 1})]
+

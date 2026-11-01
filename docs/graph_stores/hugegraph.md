@@ -5,6 +5,11 @@ contract without translating Cypher. It uses `pyhugegraph` for schema and graph
 CRUD, the native Gremlin REST endpoint for parameterized queries, and HugeGraph
 traverser APIs for supported algorithms.
 
+Unparameterized Gremlin uses the Python client's Gremlin manager. Parameterized
+queries use the REST endpoint because the client's `exec()` does not expose
+bindings; values are never interpolated into the query string. Server algorithm
+submission and task options absent from the client use a small REST fallback.
+
 ## Install
 
 ```bash
@@ -159,3 +164,28 @@ multiple directed edges, bounded multi-hop traversal, shortest paths,
 parameterized Gremlin envelopes, native algorithm dispatch, read-only mode, and
 Chinese lexical entry-node matching. A live HugeGraph container remains the
 required integration gate for release certification.
+
+
+## Unified GraphStore factory
+
+Applications that only need Semantica's common graph-store API can construct the
+backend through the public factory:
+
+```python
+from semantica.graph_store import GraphStore
+
+store = GraphStore(
+    backend="hugegraph",
+    uri="https://hugegraph.example.com",
+    graph="hugegraph",
+    user="reader",
+    password="secret",
+    read_only=True,
+)
+```
+
+Install the optional backend with `pip install "semantica[graph-hugegraph]"`.
+Backend-specific entry-node search and native traverser extensions remain on
+`HugeGraphStore`. Credentialed requests require HTTPS unless the target is a
+loopback endpoint.
+

@@ -172,13 +172,14 @@ nlp-langdetect = [
 
 # ---- Graph Backends ----
 graph-neo4j = ["neo4j>=5.0.0"]
+graph-hugegraph = ["hugegraph-python>=1.7.1"]
 graph-falkordb = ["falkordb>=1.0.0", "redis>=4.3.0"]
 graph-amazon-neptune = ["boto3>=1.24.0", "neo4j>=5.0.0"]
 graph-apache-age = ["psycopg2-binary>=2.9.0"]
 graph-embeddings = ["gensim>=4.4.0"]
 
 graph-all = [
-  "semantica[graph-neo4j,graph-falkordb,graph-amazon-neptune,graph-apache-age,graph-embeddings]"
+  "semantica[graph-neo4j,graph-hugegraph,graph-falkordb,graph-amazon-neptune,graph-apache-age,graph-embeddings]"
 ]
 
 # ---- Triplet Store Backends ----
@@ -364,3 +365,4 @@ markers = [
     "integration: marks tests that require external services or API keys (deselect with '-m not integration')",
     "no_gensim: marks tests that must still run when gensim is absent (e.g. they assert the missing-dependency behaviour)",
 ]
+

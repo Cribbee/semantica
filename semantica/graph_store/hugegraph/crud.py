@@ -23,9 +23,7 @@ class HugeGraphCrudMixin:
     @staticmethod
     def _physical_label(labels: Sequence[str]) -> str:
         if not labels:
-            raise ValidationError(
-                "HugeGraph node creation requires one vertex label"
-            )
+            raise ValidationError("HugeGraph node creation requires one vertex label")
         if len(labels) != 1:
             raise ValidationError(
                 "HugeGraph vertices have one physical label; map semantic "
@@ -51,13 +49,9 @@ class HugeGraphCrudMixin:
                 physical_id,
             )
         except Exception as exc:
-            raise ProcessingError(
-                f"Failed to create HugeGraph vertex: {exc}"
-            ) from exc
+            raise ProcessingError(f"Failed to create HugeGraph vertex: {exc}") from exc
         if value is None:
-            raise ProcessingError(
-                "HugeGraph returned no vertex after creation"
-            )
+            raise ProcessingError("HugeGraph returned no vertex after creation")
         return _node_dict(
             value,
             labels=[label],
@@ -90,10 +84,7 @@ class HugeGraphCrudMixin:
                 )
             )
 
-        has_custom_ids = any(
-            physical_id is not None
-            for _, _, physical_id in prepared
-        )
+        has_custom_ids = any(physical_id is not None for _, _, physical_id in prepared)
         if not options.get("use_native_batch", True) or has_custom_ids:
             return [
                 self.create_node(
@@ -104,10 +95,7 @@ class HugeGraphCrudMixin:
                 for label, properties, physical_id in prepared
             ]
 
-        native_rows = [
-            (label, properties)
-            for label, properties, _ in prepared
-        ]
+        native_rows = [(label, properties) for label, properties, _ in prepared]
         try:
             values = _call(
                 self._manager("graph"),
@@ -181,9 +169,7 @@ class HugeGraphCrudMixin:
                 dict(properties or {}),
             )
         except Exception as exc:
-            raise ProcessingError(
-                f"Failed to query HugeGraph vertices: {exc}"
-            ) from exc
+            raise ProcessingError(f"Failed to query HugeGraph vertices: {exc}") from exc
         return [_node_dict(value) for value in values or []][:limit]
 
     def update_node(
@@ -206,33 +192,32 @@ class HugeGraphCrudMixin:
             else:
                 current = self.get_node(node_id)
                 if current is None:
-                    raise ProcessingError(
-                        f"HugeGraph vertex {node_id!r} was not found"
-                    )
+                    raise ProcessingError(f"HugeGraph vertex {node_id!r} was not found")
                 old_properties = dict(current.get("properties") or {})
-                if old_properties:
-                    _call(
-                        manager,
-                        ("eliminate_vertex", "eliminateVertex"),
-                        node_id,
-                        old_properties,
-                    )
-                value = (
+                if properties:
                     _call(
                         manager,
                         ("append_vertex", "appendVertex"),
                         node_id,
                         dict(properties),
                     )
-                    if properties
-                    else None
-                )
+                obsolete = {
+                    key: value
+                    for key, value in old_properties.items()
+                    if key not in properties
+                }
+                if obsolete:
+                    _call(
+                        manager,
+                        ("eliminate_vertex", "eliminateVertex"),
+                        node_id,
+                        obsolete,
+                    )
+                value = self.get_node(node_id)
             if value is None:
                 refreshed = self.get_node(node_id)
                 if refreshed is None:
-                    raise ProcessingError(
-                        f"HugeGraph vertex {node_id!r} was not found"
-                    )
+                    raise ProcessingError(f"HugeGraph vertex {node_id!r} was not found")
                 return refreshed
             return _node_dict(value, properties=properties)
         except (ValidationError, ProcessingError):
@@ -289,9 +274,7 @@ class HugeGraphCrudMixin:
                 dict(properties or {}),
             )
         except Exception as exc:
-            raise ProcessingError(
-                f"Failed to create HugeGraph edge: {exc}"
-            ) from exc
+            raise ProcessingError(f"Failed to create HugeGraph edge: {exc}") from exc
         if value is None:
             raise ProcessingError("HugeGraph returned no edge after creation")
         return _edge_dict(
@@ -354,12 +337,8 @@ class HugeGraphCrudMixin:
             )
             return label_cache[node_id]
 
-        prepared: List[
-            Tuple[str, NodeId, NodeId, str, str, Dict[str, Any]]
-        ] = []
-        normalized: List[
-            Tuple[str, NodeId, NodeId, Dict[str, Any]]
-        ] = []
+        prepared: List[Tuple[str, NodeId, NodeId, str, str, Dict[str, Any]]] = []
+        normalized: List[Tuple[str, NodeId, NodeId, Dict[str, Any]]] = []
         for relationship in relationships:
             start = relationship.get(
                 "start_id",
@@ -466,9 +445,7 @@ class HugeGraphCrudMixin:
         manager = self._manager("graph")
         current = self.get_relationship(rel_id)
         if current is None:
-            raise ProcessingError(
-                f"HugeGraph edge {rel_id!r} was not found"
-            )
+            raise ProcessingError(f"HugeGraph edge {rel_id!r} was not found")
         try:
             if merge:
                 value = _call(
@@ -479,29 +456,30 @@ class HugeGraphCrudMixin:
                 )
             else:
                 old_properties = dict(current.get("properties") or {})
-                if old_properties:
-                    _call(
-                        manager,
-                        ("eliminate_edge", "eliminateEdge"),
-                        rel_id,
-                        old_properties,
-                    )
-                value = (
+                if properties:
                     _call(
                         manager,
                         ("append_edge", "appendEdge"),
                         rel_id,
                         dict(properties),
                     )
-                    if properties
-                    else None
-                )
+                obsolete = {
+                    key: value
+                    for key, value in old_properties.items()
+                    if key not in properties
+                }
+                if obsolete:
+                    _call(
+                        manager,
+                        ("eliminate_edge", "eliminateEdge"),
+                        rel_id,
+                        obsolete,
+                    )
+                value = self.get_relationship(rel_id)
             if value is None:
                 refreshed = self.get_relationship(rel_id)
                 if refreshed is None:
-                    raise ProcessingError(
-                        f"HugeGraph edge {rel_id!r} was not found"
-                    )
+                    raise ProcessingError(f"HugeGraph edge {rel_id!r} was not found")
                 return refreshed
             return _edge_dict(
                 value,
@@ -521,9 +499,7 @@ class HugeGraphCrudMixin:
     def _direction(direction: str) -> str:
         normalized = str(direction).lower()
         if normalized not in {"in", "out", "both"}:
-            raise ValidationError(
-                f"Unsupported relationship direction: {direction!r}"
-            )
+            raise ValidationError(f"Unsupported relationship direction: {direction!r}")
         return normalized
 
     def _edge_page(
@@ -597,9 +573,7 @@ class HugeGraphCrudMixin:
                     properties=properties,
                 )
         except Exception as exc:
-            raise ProcessingError(
-                f"Failed to query HugeGraph edges: {exc}"
-            ) from exc
+            raise ProcessingError(f"Failed to query HugeGraph edges: {exc}") from exc
 
         unique: Dict[str, Dict[str, Any]] = {}
         for value in values:
@@ -640,3 +614,4 @@ class HugeGraphCrudMixin:
             raise ProcessingError(
                 f"Failed to delete HugeGraph edge {rel_id!r}: {exc}"
             ) from exc
+

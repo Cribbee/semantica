@@ -34,17 +34,13 @@ def _positive_int(
         raise ValidationError(f"Invalid {name}: {value!r}") from exc
     minimum = 0 if allow_zero else 1
     if parsed < minimum:
-        raise ValidationError(
-            f"{name} must be >= {minimum}, got {parsed}"
-        )
+        raise ValidationError(f"{name} must be >= {minimum}, got {parsed}")
     return parsed
 
 
 def _identifier(value: str, kind: str) -> str:
     if not isinstance(value, str) or not _IDENTIFIER.fullmatch(value):
-        raise ValidationError(
-            f"Invalid HugeGraph {kind}: {value!r}"
-        )
+        raise ValidationError(f"Invalid HugeGraph {kind}: {value!r}")
     return value
 
 
@@ -54,8 +50,7 @@ def _find_method(target: Any, *names: str) -> Callable[..., Any]:
         if callable(candidate):
             return candidate
     raise ProcessingError(
-        f"{type(target).__name__} does not provide any of: "
-        f"{', '.join(names)}"
+        f"{type(target).__name__} does not provide any of: " f"{', '.join(names)}"
     )
 
 
@@ -82,10 +77,7 @@ def _plain(value: Any) -> Any:
     if value is None or isinstance(value, (str, int, float, bool)):
         return value
     if isinstance(value, Mapping):
-        return {
-            str(key): _plain(item)
-            for key, item in value.items()
-        }
+        return {str(key): _plain(item) for key, item in value.items()}
     if isinstance(value, (list, tuple, set)):
         return [_plain(item) for item in value]
     for fields in (
@@ -134,9 +126,7 @@ def _node_dict(
     elif label is not None:
         normalized_labels = [str(label)]
     else:
-        normalized_labels = [
-            str(item) for item in (labels or [])
-        ]
+        normalized_labels = [str(item) for item in (labels or [])]
     raw_properties = raw.get("properties")
     normalized_properties = (
         dict(raw_properties)
@@ -194,11 +184,7 @@ def _records(value: Any) -> Tuple[List[Dict[str, Any]], List[str]]:
     records: List[Dict[str, Any]] = []
     keys: List[str] = []
     for item in items:
-        record = (
-            dict(item)
-            if isinstance(item, dict)
-            else {"value": item}
-        )
+        record = dict(item) if isinstance(item, dict) else {"value": item}
         records.append(record)
         for key in record:
             if key not in keys:
@@ -224,9 +210,8 @@ def _schema_specs(
     collection: str,
 ) -> List[Dict[str, Any]]:
     value = schema.get(collection, []) or []
-    if (
-        not isinstance(value, list)
-        or any(not isinstance(item, Mapping) for item in value)
+    if not isinstance(value, list) or any(
+        not isinstance(item, Mapping) for item in value
     ):
         raise ValidationError(
             f"HugeGraph schema {collection!r} must be a list of objects"
@@ -308,8 +293,7 @@ def _validate_existing_schema(
             if mismatches:
                 raise ValidationError(
                     f"Existing HugeGraph {collection[:-1]} {name!r} "
-                    "is incompatible: "
-                    + "; ".join(mismatches)
+                    "is incompatible: " + "; ".join(mismatches)
                 )
 
 
@@ -342,15 +326,8 @@ def _query_terms(query: str) -> List[str]:
     # Chinese questions are often one token. Character bigrams preserve
     # deterministic matching without adding a tokenizer dependency.
     if _CJK.search(normalized):
-        cjk = "".join(
-            char
-            for char in normalized
-            if _CJK.fullmatch(char)
-        )
-        terms.extend(
-            cjk[index : index + 2]
-            for index in range(max(0, len(cjk) - 1))
-        )
+        cjk = "".join(char for char in normalized if _CJK.fullmatch(char))
+        terms.extend(cjk[index : index + 2] for index in range(max(0, len(cjk) - 1)))
         terms.extend(char for char in cjk if len(cjk) <= 8)
     return list(dict.fromkeys(term for term in terms if term))
 
@@ -374,3 +351,4 @@ def _lexical_score(query: str, values: Iterable[str]) -> float:
         sum(len(term) for term in matched) / max(1, len(normalized)),
     )
     return min(0.99, 0.75 * coverage + 0.25 * density)
+
