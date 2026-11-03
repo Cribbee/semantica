@@ -907,6 +907,7 @@ def build_community_hierarchy(
     method: str = "louvain",
     resolution: Union[float, List[float]] = 1.0,
     seed: Optional[int] = 42,
+    previous_hierarchy: Optional[CommunityHierarchy] = None,
     **kwargs: Any,
 ) -> CommunityHierarchy:
     """
@@ -919,11 +920,14 @@ def build_community_hierarchy(
             default: "louvain")
         resolution: Modularity resolution parameter or list of resolutions
         seed: Random seed for deterministic reproducibility (default: 42)
+        previous_hierarchy: Optional prior hierarchy for stable community identities
         **kwargs: Additional options passed to CommunityHierarchyBuilder
 
     Returns:
         CommunityHierarchy container
     """
+    if previous_hierarchy is not None:
+        kwargs["previous_hierarchy"] = previous_hierarchy
     custom_method = method_registry.get("community_hierarchy", method)
     if custom_method and custom_method is not build_community_hierarchy:
         fallback = kwargs.pop("fallback_on_custom_error", False)
@@ -946,13 +950,14 @@ def build_community_hierarchy(
             if method.lower().strip() == "default"
             else method.lower().strip()
         )
+        previous = kwargs.pop("previous_hierarchy", None)
         builder = CommunityHierarchyBuilder(
             algorithm=algo,
             resolution=resolution,
             seed=seed,
             **kwargs,
         )
-        return builder.build(graph)
+        return builder.build(graph, previous_hierarchy=previous)
     except Exception as e:
         logger.error(f"Failed to build community hierarchy: {e}")
         raise
