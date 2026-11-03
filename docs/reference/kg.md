@@ -563,6 +563,31 @@ to the serialized report inputs. In particular, an undirected NetworkX view may
 represent the same edge with opposite endpoint order; this option does not change
 the summarizer's existing edge serialization.
 
+## Bounded community report generation
+
+Use `summarizer.summarize_hierarchy(hierarchy, graph=graph, max_workers=4)` to
+opt into concurrent generation of independent communities at the same level.
+The convenience function `summarize_hierarchy` accepts the same argument.
+`max_workers=1` is the default and retains serial execution. Start with a small
+bound, such as 2, then measure throughput and provider limits before increasing it.
+
+Each level is a dependency barrier: all required child reports finish before a
+parent is submitted. Child inputs and the returned dictionary retain native order,
+not completion order. The submission window never exceeds `max_workers`; fatal
+failures stop new submissions and cancel pending work. Already running calls are
+joined before the failure is re-raised, preserving successful cache entries for
+recovery. This does not retry failed reports, cancel provider HTTP calls, or
+replace a provider's timeout/usage accounting. Parallel mode rejects incomplete
+or non-lower-level child dependencies before dispatch.
+
+The LLM provider must support concurrent calls. The source graph and text chunks
+must remain immutable throughout the call, and custom callbacks/overrides must be
+thread safe. Native cache writes remain atomic; shared embedding and centrality
+calls are serialized. If a provider serializes internally, increasing this bound
+alone will not increase throughput. Real model responses may vary between runs;
+deterministic-provider equivalence tests establish execution correctness, not
+identical live model text or a guaranteed speedup.
+
 ## Algorithm Summary
 
 | Category | Algorithms | Use Cases |

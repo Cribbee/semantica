@@ -1040,6 +1040,7 @@ def summarize_hierarchy(
     max_tokens: int = 4000,
     levels: Optional[List[int]] = None,
     text_chunks: Optional[List[Any]] = None,
+    max_workers: int = 1,
     **kwargs: Any,
 ) -> Dict[str, CommunityReport]:
     """
@@ -1053,11 +1054,16 @@ def summarize_hierarchy(
         max_tokens: Maximum context token budget
         levels: Optional subset of hierarchy levels to summarize
         text_chunks: Optional source text chunks or evidence
+        max_workers: Positive bound for same-level report generation (default: 1)
         **kwargs: Extra options passed to CommunitySummarizer
 
     Returns:
         Dictionary mapping community IDs to CommunityReport objects
     """
+    if isinstance(max_workers, bool) or not isinstance(max_workers, int) or max_workers < 1:
+        raise ValueError("max_workers must be a positive integer")
+    if max_workers != 1:
+        kwargs["max_workers"] = max_workers
     custom_method = method_registry.get("community_summary", method)
     if custom_method and custom_method not in (
         summarize_community,
