@@ -7,6 +7,7 @@ hierarchical synthesis for community reports.
 """
 
 from collections.abc import Callable
+from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
 from dataclasses import dataclass, field, replace
 import hashlib
 import json
@@ -590,6 +591,8 @@ class CommunitySummarizer:
 
         self._memory_cache: Dict[str, CommunityReport] = {}
         self._lock = threading.Lock()
+        self._embedding_lock = threading.RLock()
+        self._centrality_lock = threading.RLock()
 
         if self.cache_dir is not None:
             self.cache_dir.mkdir(parents=True, exist_ok=True)
@@ -1074,7 +1077,8 @@ class CommunitySummarizer:
             calc_graph = subgraph
 
         try:
-            res = calc_func(calc_graph)
+            with self._centrality_lock:
+                res = calc_func(calc_graph)
             if isinstance(res, dict):
                 cent_dict = (
                     res["centrality"]
@@ -2167,9 +2171,10 @@ class CommunitySummarizer:
         embedding = kwargs.get("embedding")
         if embedding is None and self.embedder is not None:
             try:
-                embedding = self.embedder(
-                    f"{schema.title}\n\n{schema.summary}"
-                )
+                with self._embedding_lock:
+                    embedding = self.embedder(
+                        f"{schema.title}\n\n{schema.summary}"
+                    )
             except Exception as e:
                 self.logger.warning(f"Embedder failed: {e}")
 
@@ -2211,6 +2216,7 @@ class CommunitySummarizer:
         use_cache: bool = True,
         max_tokens: Optional[int] = None,
         text_chunks: Optional[List[Union[str, Dict[str, Any]]]] = None,
+        max_workers: int = 1,
         **kwargs: Any,
     ) -> Dict[str, CommunityReport]:
         """
@@ -2223,18 +2229,25 @@ class CommunitySummarizer:
             use_cache: If True, uses SHA-256 caching.
             max_tokens: Override context token budget.
             text_chunks: Optional source text chunks or evidence.
+            max_workers: Positive bound on concurrent same-level report generation.
+                Defaults to serial execution. The LLM provider must support concurrent
+                calls. Shared embedding and centrality calls are serialized.
             **kwargs: Extra arguments passed to single community summarization.
 
         Returns:
             Dictionary mapping community IDs to CommunityReport objects.
         """
+        if (
+            isinstance(max_workers, bool)
+            or not isinstance(max_workers, int)
+            or max_workers < 1
+        ):
+            raise ValueError("max_workers must be a positive integer")
         if hierarchy.is_empty:
             return {}
 
         all_levels = sorted(hierarchy.levels)
-        target_levels = (
-            set(levels) if levels is not None else set(all_levels)
-        )
+        target_levels = set(levels) if levels is not None else set(all_levels)
         target_levels = target_levels & set(all_levels)
         if not target_levels:
             return {}
@@ -2267,42 +2280,124 @@ class CommunitySummarizer:
         )
 
         comm_kwargs = {
-            k: v for k, v in kwargs.items()
+            k: v
+            for k, v in kwargs.items()
             if k not in ("child_reports", "levels", "text_chunks", "chunks")
         }
 
-        # Process only levels up to max_target_level
-        levels_to_process = [
-            lvl for lvl in all_levels if lvl <= max_target_level
-        ]
-        for lvl in levels_to_process:
-            communities = hierarchy.get_communities_at_level(lvl)
-            for comm in communities:
-                if str(comm.id) not in needed_ids:
-                    continue
+        if max_workers > 1:
+            for identifier in needed_ids:
+                community = hierarchy.get_community(identifier)
+                if community is None:
+                    raise ValueError(
+                        "parallel summaries require complete child dependencies"
+                    )
+                for child_id in community.child_ids:
+                    child = hierarchy.get_community(child_id)
+                    if child is None or child.level >= community.level:
+                        raise ValueError(
+                            "parallel summaries require lower-level children"
+                        )
 
-                child_reps = [
-                    reports[str(cid)]
-                    for cid in comm.child_ids
-                    if str(cid) in reports
-                ]
-
-                report = self.summarize_community(
-                    community=comm,
-                    graph=target_graph,
-                    child_reports=child_reps,
-                    use_cache=use_cache,
-                    max_tokens=max_tokens,
-                    text_chunks=text_chunks,
-                    **comm_kwargs,
+        # A level is a dependency barrier. Publish results in native order,
+        # independent of completion order, before submitting any parent work.
+        for lvl in (level for level in all_levels if level <= max_target_level):
+            communities = [
+                community
+                for community in hierarchy.get_communities_at_level(lvl)
+                if str(community.id) in needed_ids
+            ]
+            if max_workers == 1:
+                for comm in communities:
+                    reports[str(comm.id)] = self.summarize_community(
+                        community=comm,
+                        graph=target_graph,
+                        child_reports=[
+                            reports[str(cid)]
+                            for cid in comm.child_ids
+                            if str(cid) in reports
+                        ],
+                        use_cache=use_cache,
+                        max_tokens=max_tokens,
+                        text_chunks=text_chunks,
+                        **comm_kwargs,
+                    )
+            else:
+                completed = self._summarize_parallel_level(
+                    communities,
+                    reports,
+                    target_graph,
+                    max_workers,
+                    use_cache,
+                    max_tokens,
+                    text_chunks,
+                    comm_kwargs,
                 )
-                reports[str(comm.id)] = report
+                for community in communities:
+                    reports[str(community.id)] = completed[str(community.id)]
 
         if levels is not None:
             return {
-                cid: rep
-                for cid, rep in reports.items()
-                if rep.level in target_levels
+                cid: rep for cid, rep in reports.items() if rep.level in target_levels
             }
 
         return reports
+
+    def _summarize_parallel_level(
+        self,
+        communities: List[HierarchicalCommunity],
+        reports: Dict[str, CommunityReport],
+        graph: Any,
+        max_workers: int,
+        use_cache: bool,
+        max_tokens: Optional[int],
+        text_chunks: Optional[List[Union[str, Dict[str, Any]]]],
+        options: Dict[str, Any],
+    ) -> Dict[str, CommunityReport]:
+        if not communities:
+            return {}
+        workers = min(max_workers, len(communities))
+        iterator = iter(enumerate(communities))
+        pending = {}
+        completed: Dict[str, CommunityReport] = {}
+        executor = ThreadPoolExecutor(max_workers=workers)
+
+        def submit() -> bool:
+            item = next(iterator, None)
+            if item is None:
+                return False
+            index, community = item
+            future = executor.submit(
+                self.summarize_community,
+                community=community,
+                graph=graph,
+                child_reports=[reports[str(cid)] for cid in community.child_ids],
+                use_cache=use_cache,
+                max_tokens=max_tokens,
+                text_chunks=text_chunks,
+                **options,
+            )
+            pending[future] = (index, str(community.id))
+            return True
+
+        try:
+            for _ in range(workers):
+                submit()
+            while pending:
+                done, _ = wait(pending, return_when=FIRST_COMPLETED)
+                # Inspect the entire completed batch before dispatching more work.
+                for future in sorted(done, key=lambda value: pending[value][0]):
+                    _, identifier = pending.pop(future)
+                    completed[identifier] = future.result()
+                for _ in range(workers - len(pending)):
+                    if not submit():
+                        break
+        except BaseException:
+            for future in pending:
+                future.cancel()
+            raise
+        finally:
+            # Already running provider calls must finish. Keep successful cache
+            # entries and allow the caller to account for terminal responses.
+            executor.shutdown(wait=True, cancel_futures=True)
+        return completed
