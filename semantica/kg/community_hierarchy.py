@@ -616,8 +616,22 @@ class CommunityHierarchyBuilder:
         self.config = kwargs
         self._fallback_used = False
 
-    def build(self, graph: Any) -> CommunityHierarchy:
-        """Build hierarchical community structure from graph input."""
+    def build(
+        self,
+        graph: Any,
+        *,
+        previous_hierarchy: Optional[CommunityHierarchy] = None,
+    ) -> CommunityHierarchy:
+        """Build a hierarchy, optionally retaining identities of unchanged communities.
+
+        The previous hierarchy supplies identities only, never partitions or report
+        contents. Detection still runs on the complete current graph. Omitting it
+        retains the historical positional IDs and content hashes.
+        """
+        if previous_hierarchy is not None and not isinstance(
+            previous_hierarchy, CommunityHierarchy
+        ):
+            raise TypeError("previous_hierarchy must be a CommunityHierarchy")
         self._fallback_used = False
         nx_graph = self._to_networkx(graph)
 
@@ -634,9 +648,91 @@ class CommunityHierarchyBuilder:
             partitions = self._build_louvain_partitions(nx_graph)
 
         if self.max_levels is not None and self.max_levels > 0:
-            partitions = partitions[:self.max_levels]
+            partitions = partitions[: self.max_levels]
 
-        return self._build_hierarchy_from_partitions(nx_graph, partitions)
+        hierarchy = self._build_hierarchy_from_partitions(nx_graph, partitions)
+        if previous_hierarchy is not None:
+            hierarchy = self._retain_community_identities(hierarchy, previous_hierarchy)
+        return hierarchy
+
+    def _retain_community_identities(
+        self, hierarchy: CommunityHierarchy, previous: CommunityHierarchy
+    ) -> CommunityHierarchy:
+        """Reconcile identities without mutating either hierarchy or its graph."""
+        if any(key != community.id for key, community in previous.communities.items()):
+            raise ValueError("previous_hierarchy has inconsistent community IDs")
+        old_by_members: Dict[Tuple[int, Tuple[str, ...]], HierarchicalCommunity] = {}
+        for community in previous.communities.values():
+            key = (community.level, tuple(community.entity_ids))
+            if key in old_by_members:
+                raise ValueError(
+                    "previous_hierarchy has ambiguous community membership"
+                )
+            old_by_members[key] = community
+
+        identities: Dict[str, Tuple[str, int]] = {}
+        next_index: Dict[int, int] = {}
+        for community in previous.communities.values():
+            next_index[community.level] = max(
+                next_index.get(community.level, 0), community.index + 1
+            )
+        reused = 0
+        reserved_ids = set(previous.communities)
+        for community in hierarchy.communities.values():
+            key = (community.level, tuple(community.entity_ids))
+            old = old_by_members.get(key)
+            if (
+                old is not None
+                and old.directed == community.directed
+                and old.edges == community.edges
+            ):
+                identities[community.id] = (old.id, old.index)
+                reused += 1
+            else:
+                # Do not recycle a positional ID formerly owned by another group.
+                content = compute_community_hash(
+                    community.level,
+                    0,
+                    community.entity_ids,
+                    edges=community.edges,
+                    directed=community.directed,
+                )
+                identity_hash = hashlib.sha256(
+                    json.dumps([content, community.directed]).encode("utf-8")
+                ).hexdigest()
+                identifier = f"{self.id_prefix}{community.level}_n_{identity_hash}"
+                if identifier in reserved_ids:
+                    raise ValueError("community identity collision")
+                reserved_ids.add(identifier)
+                index = next_index.get(community.level, 0)
+                next_index[community.level] = index + 1
+                identities[community.id] = (identifier, index)
+
+        communities: List[HierarchicalCommunity] = []
+        for community in hierarchy.communities.values():
+            record = community.to_dict()
+            record.update(
+                id=identities[community.id][0],
+                index=identities[community.id][1],
+                child_ids=sorted(identities[c][0] for c in community.child_ids),
+                parent_id=(
+                    identities[community.parent_id][0]
+                    if community.parent_id is not None
+                    else None
+                ),
+                content_hash="",
+            )
+            communities.append(HierarchicalCommunity.from_dict(record))
+        return CommunityHierarchy(
+            communities=communities,
+            graph=hierarchy._graph,
+            metadata={
+                **hierarchy.metadata,
+                "identity_policy": "previous-hierarchy-v1",
+                "identity_reused": reused,
+                "identity_new": len(communities) - reused,
+            },
+        )
 
     def _to_networkx(self, graph: Any) -> Union[nx.Graph, nx.DiGraph]:
         """Convert input graph into NetworkX Graph or DiGraph."""

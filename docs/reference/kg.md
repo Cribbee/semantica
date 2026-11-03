@@ -516,6 +516,53 @@ for node_id in similar:
 </Tabs>
 
 
+## Incremental community report reuse
+
+Community IDs are positional by default. Rebuilding a hierarchy after an unrelated
+community is inserted can renumber otherwise unchanged communities and invalidate
+their report cache entries. Supply a prior hierarchy to opt into identity retention:
+
+```python
+from semantica.kg import CommunityHierarchyBuilder, CommunitySummarizer
+
+builder = CommunityHierarchyBuilder(seed=42)
+previous = builder.build(old_graph)
+summarizer = CommunitySummarizer(llm=provider, cache_dir="reports")
+old_reports = summarizer.summarize_hierarchy(previous, graph=old_graph)
+
+current = builder.build(new_graph, previous_hierarchy=previous)
+reports = summarizer.summarize_hierarchy(current, graph=new_graph)
+```
+
+The convenience function `build_community_hierarchy` accepts the same optional
+`previous_hierarchy` argument. A saved hierarchy can be restored with
+`CommunityHierarchy.from_dict` before passing it back to the builder.
+
+Detection still runs on the complete current graph: the previous hierarchy does
+not dictate partitions. At the same level, communities with identical members,
+canonical internal edges and direction retain their previous IDs and indices.
+New or changed communities get deterministic non-positional IDs and indices after
+the previously allocated range; retained indices can therefore have gaps. Child
+and parent links are remapped together and hashes are recomputed using the native
+hash function. Neither the previous hierarchy nor its graph is modified. Metadata
+records `identity_policy`, `identity_reused`, and `identity_new`.
+
+Stable identity is not unconditional cache eligibility. Native report cache keys
+still account for graph evidence, source chunks, child report inputs, generation
+budgets and prompt options. Changed source attributes or child summaries continue
+to require generation. Cache hits refresh the returned report's parent link and
+structural metrics from the current community without rewriting historical cache
+files. Use a cache directory appropriate to the model/provider configuration;
+identity retention does not authorize cross-model reuse.
+
+Omitting `previous_hierarchy` preserves the default positional IDs, hashes and
+partitioning behavior. Graph/backend adapters must also retain stable entity IDs
+and equivalent evidence serialization to benefit from reuse. Identity retention
+cannot make genuinely changed partitions reusable, nor repair arbitrary changes
+to the serialized report inputs. In particular, an undirected NetworkX view may
+represent the same edge with opposite endpoint order; this option does not change
+the summarizer's existing edge serialization.
+
 ## Algorithm Summary
 
 | Category | Algorithms | Use Cases |

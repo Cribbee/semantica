@@ -7,7 +7,7 @@ hierarchical synthesis for community reports.
 """
 
 from collections.abc import Callable
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 import hashlib
 import json
 import math
@@ -2058,7 +2058,19 @@ class CommunitySummarizer:
         if use_cache and self.cache_enabled:
             cached = self.get_cached_report(cache_key)
             if cached is not None:
-                return cached
+                # Parent links and structural metrics are not generation inputs.
+                # Refresh them on a detached report; never mutate the cached object.
+                return replace(
+                    cached,
+                    parent_id=comm.parent_id,
+                    sub_communities=list(comm.child_ids)
+                    or [str(report.community_id) for report in (child_reports or [])],
+                    metadata={
+                        "size": comm.size,
+                        "directed": comm.directed,
+                        **dict(comm.metrics),
+                    },
+                )
 
         if total_budget <= 0:
             schema = self._extractive_fallback(comm)
