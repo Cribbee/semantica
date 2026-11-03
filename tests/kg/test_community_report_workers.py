@@ -84,7 +84,7 @@ class Fatal(BaseException):
     pass
 
 
-@pytest.mark.parametrize("workers", [2, 4])
+@pytest.mark.parametrize("workers", [2, 4, 8])
 def test_parallel_reports_and_cache_bytes_match_serial_with_out_of_order_completion(
     tmp_path, workers
 ):
