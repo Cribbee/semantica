@@ -76,9 +76,12 @@ Author: Semantica Contributors
 License: MIT
 """
 
+from copy import deepcopy
 from datetime import datetime, timezone
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional, Tuple, Union
+
+from .query_plan import QueryPlan
 
 from ..utils.logging import get_logger
 from ..utils.progress_tracker import get_progress_tracker
@@ -657,6 +660,148 @@ class ContextRetriever:
             return contexts[:max_results]
         return res
 
+    def plan_query(self, query: str, **options: Any) -> QueryPlan:
+        """Plan once through native DRIFT, without traversal or synthesis."""
+        from .drift_search import DriftSearchEngine
+
+        embedding = options.pop("query_embedding", None)
+        options.setdefault("knowledge_graph", self.knowledge_graph)
+        options.setdefault("reports", self.community_reports)
+        options.setdefault("hierarchy", self.community_hierarchy)
+        options.setdefault("llm", self.llm)
+        return DriftSearchEngine(**options).plan(query, query_embedding=embedding)
+
+    def retrieve_plan(
+        self,
+        plan: QueryPlan,
+        mode: str = "local",
+        item_ids: Optional[List[str]] = None,
+        max_results: int = 5,
+        **options: Any,
+    ) -> List[Dict[str, Any]]:
+        """Retrieve each planned query without generating facets or answers.
+
+        Every selected item receives a receipt, including empty retrievals.
+        Local ranking/expansion uses the existing public retrieval path.
+        DRIFT uses the selected item's seeds and alignment query. Limits are
+        per item, not a total execution budget; callers own shared budgets.
+        """
+        if not isinstance(plan, QueryPlan):
+            raise ValueError("retrieve_plan requires a QueryPlan")
+        if mode not in ("local", "drift"):
+            raise ValueError("Plan retrieval supports local or drift")
+        if mode == "drift" and options.get("truth_filter") is not None:
+            raise ValidationError(
+                "truth_filter is supported only with mode='local'",
+                validation_context={
+                    "method": "ContextRetriever.retrieve_plan",
+                    "mode": mode,
+                },
+            )
+        if max_results < 1:
+            raise ValueError("max_results must be positive")
+        reserved = {"plan", "item_ids", "synthesize", "as_contexts"}
+        if reserved.intersection(options):
+            raise ValueError("Plan retrieval options cannot override consumption")
+        selected = plan.select(item_ids)
+        drift_result = None
+        drift_contexts = []
+        if mode == "drift":
+            drift_result = self.retrieve_drift(
+                plan.query,
+                plan=plan,
+                item_ids=[item.item_id for item in selected],
+                synthesize=False,
+                as_contexts=False,
+                **options,
+            )
+            drift_contexts = self._drift_result_contexts(
+                drift_result,
+                options.get("min_relevance_score", 0.0),
+                options.get("min_trust_tier"),
+            )
+        results = []
+        for item in selected:
+            if mode == "drift":
+                all_contexts = [
+                    context
+                    for context in drift_contexts
+                    if context.metadata.get("plan_item_id") == item.item_id
+                ]
+                metrics = dict(
+                    next(
+                        row
+                        for row in drift_result.metrics["items"]
+                        if row["item_id"] == item.item_id
+                    )
+                )
+                metrics["contexts_before_filters"] = sum(
+                    fact.get("plan_item_id") == item.item_id
+                    for fact in drift_result.verified_local_contexts
+                )
+                metrics["contexts_after_filters"] = len(all_contexts)
+            else:
+                # Seed names are explicit query hints for the legacy local
+                # ranker, not a claim of resolved/mandatory graph seed IDs.
+                actual_query = item.sub_query + (
+                    "\nTarget entities: " + ", ".join(item.target_entities)
+                    if item.target_entities
+                    else ""
+                )
+                all_contexts = self.retrieve(
+                    actual_query,
+                    mode="local",
+                    max_results=max_results + 1,
+                    **options,
+                )
+                # The legacy local API has no budget-stop receipt. Do not infer
+                # graph completeness from a full/empty top-k result.
+                metrics = {"budget_reached": None}
+            contexts = deepcopy(all_contexts[:max_results])
+            for context in contexts:
+                context.metadata = dict(
+                    context.metadata,
+                    plan_hash=plan.content_hash,
+                    plan_item_id=item.item_id,
+                    query=item.sub_query,
+                )
+            results.append(
+                {
+                    "plan_hash": plan.content_hash,
+                    "item_id": item.item_id,
+                    "query": item.sub_query,
+                    "mode": mode,
+                    "actual_query": actual_query if mode == "local" else item.sub_query,
+                    "seed_entities": list(item.target_entities),
+                    "seed_mode": "query_hints" if mode == "local" else "graph_seeds",
+                    "contexts": contexts,
+                    "empty": not contexts,
+                    "results_truncated": len(all_contexts) > max_results,
+                    "metrics": metrics,
+                }
+            )
+        return results
+
+    def _drift_result_contexts(
+        self,
+        result: Any,
+        min_relevance_score: float = 0.0,
+        min_trust_tier: Optional["TrustTier"] = None,
+    ) -> List[RetrievedContext]:
+        """Apply identical relevance/trust admission to both public DRIFT APIs."""
+        threshold = (
+            max(0.0, min(1.0, min_relevance_score / 10.0))
+            if min_relevance_score > 1.0
+            else max(0.0, min(1.0, min_relevance_score))
+        )
+        contexts = [c for c in result.to_retrieved_contexts() if c.score >= threshold]
+        self._attach_trust_tiers(contexts)
+        if min_trust_tier is not None:
+            contexts = self.filter_by_tier(
+                contexts, min_trust_tier, include_unscored=True
+            )
+        return contexts
+
     def retrieve_drift(
         self,
         query: str,
@@ -719,23 +864,9 @@ class ContextRetriever:
         )
         res = engine.search(query, max_depth=max_depth, **options)
         if as_contexts:
-            context_threshold = (
-                max(0.0, min(1.0, min_relevance_score / 10.0))
-                if min_relevance_score > 1.0
-                else max(0.0, min(1.0, min_relevance_score))
-            )
-            contexts = [
-                c for c in res.to_retrieved_contexts()
-                if c.score >= context_threshold
-            ]
-            self._attach_trust_tiers(contexts)
-            if min_trust_tier is not None:
-                # The DRIFT answer is an unscored summary and is kept; the
-                # verified local facts are graded as graph facts and filtered.
-                contexts = self.filter_by_tier(
-                    contexts, min_trust_tier, include_unscored=True
-                )
-            return contexts[:max_results]
+            return self._drift_result_contexts(
+                res, min_relevance_score, min_trust_tier
+            )[:max_results]
         return res
 
     def _retrieve_from_vector(

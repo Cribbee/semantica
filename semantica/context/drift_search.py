@@ -10,6 +10,7 @@ executive synthesis.
 from collections.abc import Callable, Iterable
 from dataclasses import dataclass, field
 import hashlib
+from inspect import signature
 import json
 import math
 import re
@@ -22,6 +23,7 @@ from ..kg.community_hierarchy import CommunityHierarchy
 from ..kg.community_summarizer import CommunityReport, estimate_tokens
 from ..utils.logging import get_logger
 from .context_retriever import RetrievedContext
+from .query_plan import QueryPlan, QueryPlanItem
 
 logger = get_logger("drift_search")
 
@@ -184,6 +186,13 @@ class DriftFacetsResponseSchema(BaseModel):
         return normalized
 
 
+class StrictDriftFacetsResponseSchema(BaseModel):
+    """New plan path must not silently normalize away invalid list entries."""
+
+    model_config = ConfigDict(extra="forbid")
+    facets: List[DriftFacetSchema] = Field(min_length=1)
+
+
 @dataclass
 class DriftSearchResult:
     """Result of DRIFT hybrid search."""
@@ -212,24 +221,25 @@ class DriftSearchResult:
         if not self.global_reports_used and not self.verified_local_contexts:
             return contexts
 
-        # Primary executive answer
-        contexts.append(
-            RetrievedContext(
-                content=self.answer,
-                score=1.0,
-                source="drift_search",
-                metadata={
-                    "query": self.query,
-                    "thematic_framing": self.thematic_framing,
-                    "depth_reached": self.depth_reached,
-                    "pruned_fact_count": self.pruned_fact_count,
-                    "citations": list(self.citations),
-                    "metrics": dict(self.metrics),
-                },
-                related_entities=[],
-                related_relationships=[],
+        # Retrieval-only consumption does not invent an empty executive answer.
+        if self.answer:
+            contexts.append(
+                RetrievedContext(
+                    content=self.answer,
+                    score=1.0,
+                    source="drift_search",
+                    metadata={
+                        "query": self.query,
+                        "thematic_framing": self.thematic_framing,
+                        "depth_reached": self.depth_reached,
+                        "pruned_fact_count": self.pruned_fact_count,
+                        "citations": list(self.citations),
+                        "metrics": dict(self.metrics),
+                    },
+                    related_entities=[],
+                    related_relationships=[],
+                )
             )
-        )
 
         # Verified local graph contexts
         for fact in self.verified_local_contexts:
@@ -274,6 +284,11 @@ class DriftSearchResult:
                         "depth": fact.get("depth", 0),
                         "alignment_score": score_val,
                         **dict(fact.get("attributes", {})),
+                        **(
+                            {"plan_item_id": fact["plan_item_id"]}
+                            if "plan_item_id" in fact
+                            else {}
+                        ),
                     },
                     related_entities=entities,
                     related_relationships=[rel_data],
@@ -1065,17 +1080,24 @@ class DriftSearchEngine:
         raise ValueError(f"No valid JSON in response: {cleaned[:100]}...")
 
     def _coerce_facets_response(
-        self, res: Any
-    ) -> Optional[DriftFacetsResponseSchema]:
+        self, res: Any, strict: bool = False
+    ) -> Optional[Union[DriftFacetsResponseSchema, StrictDriftFacetsResponseSchema]]:
         """Coerce arbitrary response into DriftFacetsResponseSchema."""
+        if strict:
+            if hasattr(res, "model_dump") and callable(res.model_dump):
+                res = res.model_dump()
+            if isinstance(res, str):
+                res = self._extract_json(res)
+            if isinstance(res, list):
+                res = {"facets": res}
+            return StrictDriftFacetsResponseSchema.model_validate(res)
         if isinstance(res, DriftFacetsResponseSchema):
             return res
         if isinstance(res, list):
             return DriftFacetsResponseSchema(facets=res)
         if isinstance(res, dict):
             if "facets" not in res and any(
-                k in res
-                for k in ("sub_query", "query", "question", "target_entities")
+                k in res for k in ("sub_query", "query", "question", "target_entities")
             ):
                 return DriftFacetsResponseSchema(facets=[res])
             return DriftFacetsResponseSchema.model_validate(res)
@@ -1107,13 +1129,42 @@ class DriftSearchEngine:
                 pass
         return None
 
+    @staticmethod
+    def _call_facet_typed(method: Any, prompt: str, strict: bool) -> Any:
+        if strict:
+            # Inspect shape before dispatch. A provider's own TypeError must
+            # never cause a second request with uncertain first-call status.
+            try:
+                signature(method).bind(prompt, schema=StrictDriftFacetsResponseSchema)
+            except TypeError:
+                return method(prompt)
+            except ValueError:
+                pass
+            return method(prompt, schema=StrictDriftFacetsResponseSchema)
+        try:
+            return method(prompt, schema=DriftFacetsResponseSchema)
+        except TypeError:
+            return method(prompt)
+
     def _generate_facets(
-        self, query: str, thematic_framing: str
+        self,
+        query: str,
+        thematic_framing: str,
+        *,
+        generation_info: Optional[Dict[str, Any]] = None,
+        propagate_provider_errors: bool = False,
     ) -> List[DriftFacet]:
         """Stage 2: Directed reasoning to produce follow-up exploration facets."""
+        info = generation_info if generation_info is not None else {}
+        info.update(
+            generation_method="extractive_fallback",
+            query_truncated=False,
+            framing_truncated=False,
+            items_truncated=False,
+        )
         llm = self.llm
         if llm is None:
-            return self._extractive_facets_fallback(query)
+            return self._extractive_facets_fallback(query, generation_info=info)
 
         prompt_scaffold = (
             "You are a directed reasoning engine in a GraphRAG system.\n"
@@ -1170,18 +1221,24 @@ class DriftSearchEngine:
             "{'sub_query', 'target_entities', 'rationale', 'relevance_score'}."
         )
 
+        info["query_truncated"] = budgeted_query != query
+        info["framing_truncated"] = budgeted_framing != thematic_framing
+
         facets_resp = None
         # Tier 1: generate_typed
         if hasattr(llm, "generate_typed") and callable(llm.generate_typed):
             try:
-                try:
-                    res = llm.generate_typed(
-                        prompt, schema=DriftFacetsResponseSchema
-                    )
-                except TypeError:
-                    res = llm.generate_typed(prompt)
-                facets_resp = self._coerce_facets_response(res)
+                res = self._call_facet_typed(
+                    llm.generate_typed, prompt, propagate_provider_errors
+                )
+                facets_resp = self._coerce_facets_response(
+                    res, strict=propagate_provider_errors
+                )
+                if propagate_provider_errors and facets_resp is None:
+                    raise ValueError("drift_plan_response_invalid")
             except Exception as e:
+                if propagate_provider_errors:
+                    raise
                 self.logger.warning(f"Drift Tier 1 generate_typed failed: {e}")
 
         # Tier 2: provider.generate_typed
@@ -1192,41 +1249,71 @@ class DriftSearchEngine:
             and callable(llm.provider.generate_typed)
         ):
             try:
-                try:
-                    res = llm.provider.generate_typed(
-                        prompt, schema=DriftFacetsResponseSchema
-                    )
-                except TypeError:
-                    res = llm.provider.generate_typed(prompt)
-                facets_resp = self._coerce_facets_response(res)
+                res = self._call_facet_typed(
+                    llm.provider.generate_typed, prompt, propagate_provider_errors
+                )
+                facets_resp = self._coerce_facets_response(
+                    res, strict=propagate_provider_errors
+                )
+                if propagate_provider_errors and facets_resp is None:
+                    raise ValueError("drift_plan_response_invalid")
             except Exception as e:
+                if propagate_provider_errors:
+                    raise
                 self.logger.warning(f"Drift Tier 2 failed: {e}")
 
         # Tier 3: generate_structured
         if facets_resp is None and hasattr(llm, "generate_structured"):
             try:
                 res = llm.generate_structured(prompt)
-                facets_resp = self._coerce_facets_response(res)
+                facets_resp = self._coerce_facets_response(
+                    res, strict=propagate_provider_errors
+                )
+                if propagate_provider_errors and facets_resp is None:
+                    raise ValueError("drift_plan_response_invalid")
             except Exception as e:
+                if propagate_provider_errors:
+                    raise
                 self.logger.warning(f"Drift Tier 3 failed: {e}")
 
         # Tier 4: generate + JSON parse
         if facets_resp is None and hasattr(llm, "generate"):
             try:
                 res = llm.generate(prompt)
-                facets_resp = self._coerce_facets_response(res)
+                facets_resp = self._coerce_facets_response(
+                    res, strict=propagate_provider_errors
+                )
+                if propagate_provider_errors and facets_resp is None:
+                    raise ValueError("drift_plan_response_invalid")
             except Exception as e:
+                if propagate_provider_errors:
+                    raise
                 self.logger.warning(f"Drift Tier 4 failed: {e}")
 
         # Tier 5: callable
         if facets_resp is None and callable(llm):
             try:
                 res = llm(prompt)
-                facets_resp = self._coerce_facets_response(res)
+                facets_resp = self._coerce_facets_response(
+                    res, strict=propagate_provider_errors
+                )
+                if propagate_provider_errors and facets_resp is None:
+                    raise ValueError("drift_plan_response_invalid")
             except Exception as e:
+                if propagate_provider_errors:
+                    raise
                 self.logger.warning(f"Drift Tier 5 failed: {e}")
 
         if facets_resp and facets_resp.facets:
+            valid_facets = [f for f in facets_resp.facets if f.sub_query.strip()]
+            if propagate_provider_errors and len(valid_facets) != len(
+                facets_resp.facets
+            ):
+                raise ValueError("drift_plan_empty_sub_query")
+            if not valid_facets:
+                return self._extractive_facets_fallback(query, generation_info=info)
+            info["generation_method"] = "model"
+            info["items_truncated"] = len(valid_facets) > self.max_facets
             return [
                 DriftFacet(
                     sub_query=f.sub_query,
@@ -1235,12 +1322,14 @@ class DriftSearchEngine:
                     depth=0,
                     relevance_score=f.relevance_score,
                 )
-                for f in facets_resp.facets[: self.max_facets]
+                for f in valid_facets[: self.max_facets]
             ]
 
-        return self._extractive_facets_fallback(query)
+        return self._extractive_facets_fallback(query, generation_info=info)
 
-    def _extractive_facets_fallback(self, query: str) -> List[DriftFacet]:
+    def _extractive_facets_fallback(
+        self, query: str, generation_info: Optional[Dict[str, Any]] = None
+    ) -> List[DriftFacet]:
         """Deterministic extractive fallback for facet generation."""
         query_words = _extract_words(query)
         candidate_entities: List[str] = []
@@ -1256,15 +1345,13 @@ class DriftSearchEngine:
             name = str(meta.get("name") or "")
             label = str(meta.get("label") or "")
             aliases = (
-                meta.get("aliases")
-                if isinstance(meta.get("aliases"), list)
-                else []
+                meta.get("aliases") if isinstance(meta.get("aliases"), list) else []
             )
             names_to_check = [nid, name, label] + list(aliases)
             matched = any(
-                n and (
-                    n.lower() in query.lower()
-                    or bool(_extract_words(n) & query_words)
+                n
+                and (
+                    n.lower() in query.lower() or bool(_extract_words(n) & query_words)
                 )
                 for n in names_to_check
             )
@@ -1285,6 +1372,10 @@ class DriftSearchEngine:
                 if cand not in candidate_entities:
                     candidate_entities.append(cand)
 
+        if generation_info is not None:
+            generation_info["items_truncated"] = (
+                len(candidate_entities) > self.max_facets
+            )
         facets: List[DriftFacet] = []
         for ent in candidate_entities[: self.max_facets]:
             facets.append(
@@ -1315,6 +1406,7 @@ class DriftSearchEngine:
         fact_text: str,
         query_context: str,
         query_embedding: Optional[List[float]] = None,
+        propagate_provider_errors: bool = False,
     ) -> float:
         """Compute semantic alignment score for Stage 4 drift pruning."""
         if self.embedder is not None and query_embedding is not None:
@@ -1322,6 +1414,8 @@ class DriftSearchEngine:
                 fact_emb = self.embedder(fact_text)
                 return _cosine_similarity(query_embedding, fact_emb)
             except Exception as e:
+                if propagate_provider_errors:
+                    raise
                 self.logger.debug(f"Fact embedding alignment failed: {e}")
 
         # Heuristic token overlap & substring alignment
@@ -1351,6 +1445,8 @@ class DriftSearchEngine:
         query_embedding: Optional[List[float]] = None,
         max_depth: Optional[int] = None,
         drift_threshold: Optional[float] = None,
+        receipt: Optional[Dict[str, Any]] = None,
+        propagate_provider_errors: bool = False,
     ) -> tuple[List[Dict[str, Any]], int, int]:
         """
         Stages 3, 4, and 5: Local entity-hop traversal, drift pruning, and deepening.
@@ -1363,9 +1459,7 @@ class DriftSearchEngine:
         accumulated_tokens = 0
         budget_reached = False
 
-        eff_max_depth = (
-            self.max_depth if max_depth is None else max(1, int(max_depth))
-        )
+        eff_max_depth = self.max_depth if max_depth is None else max(1, int(max_depth))
         eff_drift_thresh = (
             self.drift_threshold
             if drift_threshold is None
@@ -1431,12 +1525,8 @@ class DriftSearchEngine:
                         continue
                     seen_edges.add(canon_id)
 
-                    src_name = str(
-                        self._node_meta.get(src, {}).get("name") or src
-                    )
-                    tgt_name = str(
-                        self._node_meta.get(tgt, {}).get("name") or tgt
-                    )
+                    src_name = str(self._node_meta.get(src, {}).get("name") or src)
+                    tgt_name = str(self._node_meta.get(tgt, {}).get("name") or tgt)
 
                     if edge.get("is_inverse"):
                         fact_text = (
@@ -1450,7 +1540,14 @@ class DriftSearchEngine:
                         )
 
                     score = self._compute_alignment_score(
-                        fact_text, query_context, query_embedding
+                        fact_text,
+                        query_context,
+                        query_embedding,
+                        **(
+                            {"propagate_provider_errors": True}
+                            if propagate_provider_errors
+                            else {}
+                        ),
                     )
 
                     if score >= eff_drift_thresh:
@@ -1498,6 +1595,20 @@ class DriftSearchEngine:
 
             current_frontier = next_frontier
 
+        if receipt is not None:
+            receipt.update(
+                budget_reached=budget_reached,
+                context_tokens=accumulated_tokens,
+                context_token_budget=facts_budget,
+                seed_count=len(
+                    {
+                        self._resolve_node_id(entity)
+                        for facet in facets
+                        for entity in facet.target_entities
+                        if self._resolve_node_id(entity) in self._adjacency_index
+                    }
+                ),
+            )
         return (verified_facts, depth_reached, pruned_count)
 
     def _synthesize_hybrid(
@@ -1505,6 +1616,7 @@ class DriftSearchEngine:
         query: str,
         thematic_framing: str,
         verified_facts: List[Dict[str, Any]],
+        propagate_provider_errors: bool = False,
     ) -> str:
         """Stage 6: Authoritative dual-attributed executive synthesis."""
         llm = self.llm
@@ -1554,13 +1666,9 @@ class DriftSearchEngine:
         available_for_context = max(
             0, self.max_context_tokens - base_tokens - query_tokens - response_reserve
         )
-        framing_target = (
-            available_for_context // 2 if available_for_context > 0 else 0
-        )
+        framing_target = available_for_context // 2 if available_for_context > 0 else 0
         budgeted_framing = (
-            _truncate_to_tokens(
-                thematic_framing, framing_target, self.token_counter
-            )
+            _truncate_to_tokens(thematic_framing, framing_target, self.token_counter)
             if framing_target > 0
             else ""
         )
@@ -1633,11 +1741,47 @@ class DriftSearchEngine:
                 )
             return str(res).strip()
         except Exception as e:
+            if propagate_provider_errors:
+                raise
             self.logger.warning(f"DRIFT synthesis LLM failed: {e}")
             return (
                 f"DRIFT answer for '{query}':\n\n{budgeted_framing}\n\n"
                 f"Verified Facts:\n{facts_text}"
             )
+
+    def plan(
+        self, query: str, query_embedding: Optional[List[float]] = None
+    ) -> QueryPlan:
+        """Generate a shareable plan using DRIFT framing/facets only.
+
+        No traversal or answer synthesis is performed. Receipts distinguish
+        model planning from deterministic fallback and disclose input limits.
+        """
+        if not isinstance(query, str) or not query.strip():
+            raise ValueError("Plan query must be nonempty")
+        if query_embedding is None and self.embedder is not None:
+            query_embedding = self.embedder(query)
+        framing, reports = self._extract_thematic_framing(query, query_embedding)
+        info: Dict[str, Any] = {}
+        facets = self._generate_facets(
+            query, framing, generation_info=info, propagate_provider_errors=True
+        )
+        return QueryPlan(
+            query=query,
+            items=tuple(
+                QueryPlanItem(
+                    item_id=f"item_{index + 1:03d}",
+                    sub_query=facet.sub_query,
+                    target_entities=tuple(facet.target_entities),
+                    rationale=facet.rationale,
+                    relevance_score=facet.relevance_score,
+                )
+                for index, facet in enumerate(facets)
+            ),
+            thematic_framing=framing,
+            global_reports_used=tuple(reports),
+            **info,
+        )
 
     def search(
         self,
@@ -1645,6 +1789,9 @@ class DriftSearchEngine:
         query_embedding: Optional[List[float]] = None,
         max_depth: Optional[int] = None,
         drift_threshold: Optional[float] = None,
+        plan: Optional[QueryPlan] = None,
+        item_ids: Optional[Sequence[str]] = None,
+        synthesize: bool = True,
         **kwargs: Any,
     ) -> DriftSearchResult:
         """
@@ -1660,43 +1807,100 @@ class DriftSearchEngine:
         Returns:
             DriftSearchResult with answer, verified contexts, citations, and metrics.
         """
+        if plan is not None:
+            if not isinstance(plan, QueryPlan) or plan.query != query:
+                raise ValueError("Supplied plan must match the original query")
+            plan.select(item_ids)
+        elif item_ids is not None:
+            raise ValueError("item_ids requires a supplied plan")
         start_time = time.time()
-        eff_max_depth = (
-            self.max_depth if max_depth is None else max(1, int(max_depth))
-        )
+        eff_max_depth = self.max_depth if max_depth is None else max(1, int(max_depth))
         eff_drift_thresh = (
             self.drift_threshold
             if drift_threshold is None
             else max(0.0, min(1.0, float(drift_threshold)))
         )
 
-        if query_embedding is None and self.embedder is not None:
+        if plan is None and query_embedding is None and self.embedder is not None:
             try:
                 query_embedding = self.embedder(query)
             except Exception as e:
                 self.logger.warning(f"Query embedding calculation failed: {e}")
 
-        # Stage 1: Thematic framing
-        thematic_framing, global_reports_used = self._extract_thematic_framing(
-            query, query_embedding
-        )
+        item_receipts: List[Dict[str, Any]] = []
+        if plan is None:
+            if item_ids is not None:
+                raise ValueError("item_ids requires a supplied plan")
+            # Stage 1: Thematic framing
+            thematic_framing, global_reports_used = self._extract_thematic_framing(
+                query, query_embedding
+            )
 
-        # Stage 2: Directed reasoning and facet generation
-        facets = self._generate_facets(query, thematic_framing)
+            # Stage 2: Directed reasoning and facet generation
+            facets = self._generate_facets(query, thematic_framing)
 
-        # Stages 3, 4, 5: Local traversal, drift pruning, deepening
-        (
-            verified_facts,
-            depth_reached,
-            pruned_count,
-        ) = self._traverse_and_prune(
-            facets,
-            query,
-            thematic_framing,
-            query_embedding,
-            max_depth=eff_max_depth,
-            drift_threshold=eff_drift_thresh,
-        )
+            # Stages 3, 4, 5: Local traversal, drift pruning, deepening
+            (
+                verified_facts,
+                depth_reached,
+                pruned_count,
+            ) = self._traverse_and_prune(
+                facets,
+                query,
+                thematic_framing,
+                query_embedding,
+                max_depth=eff_max_depth,
+                drift_threshold=eff_drift_thresh,
+            )
+
+        else:
+            if not isinstance(plan, QueryPlan) or plan.query != query:
+                raise ValueError("Supplied plan must match the original query")
+            selected = plan.select(item_ids)
+            thematic_framing = plan.thematic_framing
+            global_reports_used = list(plan.global_reports_used)
+            facets = []
+            verified_facts = []
+            depth_reached = 0
+            pruned_count = 0
+            for item in selected:
+                facet = DriftFacet(
+                    item.sub_query,
+                    list(item.target_entities),
+                    item.rationale,
+                    relevance_score=item.relevance_score,
+                )
+                facets.append(facet)
+                item_embedding = (
+                    self.embedder(item.sub_query) if self.embedder else None
+                )
+                receipt: Dict[str, Any] = {}
+                facts, reached, pruned = self._traverse_and_prune(
+                    [facet],
+                    item.sub_query,
+                    thematic_framing,
+                    item_embedding,
+                    max_depth=eff_max_depth,
+                    drift_threshold=eff_drift_thresh,
+                    receipt=receipt,
+                    propagate_provider_errors=True,
+                )
+                verified_facts.extend(
+                    dict(fact, plan_item_id=item.item_id) for fact in facts
+                )
+                depth_reached = max(depth_reached, reached)
+                pruned_count += pruned
+                item_receipts.append(
+                    dict(
+                        receipt,
+                        item_id=item.item_id,
+                        query=item.sub_query,
+                        empty=not facts,
+                        facts_count=len(facts),
+                        depth_reached=reached,
+                        pruned_count=pruned,
+                    )
+                )
 
         # Sort verified_facts descending by alignment_score
         verified_facts.sort(
@@ -1708,7 +1912,16 @@ class DriftSearchEngine:
         )
 
         # Stage 6: Authoritative dual-attributed synthesis
-        answer = self._synthesize_hybrid(query, thematic_framing, verified_facts)
+        answer = (
+            self._synthesize_hybrid(
+                query,
+                thematic_framing,
+                verified_facts,
+                **({"propagate_provider_errors": True} if plan else {}),
+            )
+            if synthesize
+            else ""
+        )
 
         # Citation extraction
         raw_comm_cits = re.findall(
@@ -1761,7 +1974,7 @@ class DriftSearchEngine:
                     rel_cits.append(cit_str)
 
         citations = comm_cits + rel_cits
-        if not citations and global_reports_used:
+        if synthesize and not citations and global_reports_used:
             citations = [f"[Community {c}]" for c in global_reports_used]
 
         duration = time.time() - start_time
@@ -1774,6 +1987,11 @@ class DriftSearchEngine:
             "global_reports_count": len(global_reports_used),
             "citations_count": len(citations),
         }
+
+        if plan is not None:
+            metrics.update(
+                plan_hash=plan.content_hash, items=item_receipts, synthesized=synthesize
+            )
 
         return DriftSearchResult(
             query=query,

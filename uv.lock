@@ -2614,6 +2614,22 @@ wheels = [
 ]
 
 [[package]]
+name = "hugegraph-python"
+version = "1.7.1"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "decorator" },
+    { name = "requests" },
+    { name = "rich" },
+    { name = "setuptools" },
+    { name = "urllib3" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/cb/d9/07372cb27d1f36cef23b922b356df881a565e664129e7295cff5e692ef7e/hugegraph_python-1.7.1.tar.gz", hash = "sha256:7db91e70e3d9152cf99c4d3f79967a9f573fb15a666333fe5a68f5cde59b96cd", size = 31441, upload-time = "2026-09-26T12:37:39.951Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/64/47/a06c5952dee468fd545ef92786e6f2440c087101b6e0d1ac6b21b75f9272/hugegraph_python-1.7.1-py3-none-any.whl", hash = "sha256:44d804bbfc7472fd40ff5c4d41a9ce3d15d1dab9f117476dd2de5335b0b32849", size = 64052, upload-time = "2026-09-26T12:37:38.605Z" },
+]
+
+[[package]]
 name = "huggingface-hub"
 version = "1.32.0"
 source = { registry = "https://pypi.org/simple" }
@@ -6990,6 +7006,7 @@ all = [
     { name = "google-genai" },
     { name = "graphviz" },
     { name = "groq" },
+    { name = "hugegraph-python" },
     { name = "instructor" },
     { name = "ipywidgets" },
     { name = "kafka-python" },
@@ -7119,6 +7136,7 @@ graph-all = [
     { name = "boto3" },
     { name = "falkordb" },
     { name = "gensim" },
+    { name = "hugegraph-python" },
     { name = "neo4j" },
     { name = "psycopg2-binary" },
     { name = "redis" },
@@ -7136,6 +7154,9 @@ graph-embeddings = [
 graph-falkordb = [
     { name = "falkordb" },
     { name = "redis" },
+]
+graph-hugegraph = [
+    { name = "hugegraph-python" },
 ]
 graph-neo4j = [
     { name = "neo4j" },
@@ -7366,6 +7387,7 @@ requires-dist = [
     { name = "groq", marker = "extra == 'llm-groq'", specifier = ">=0.4.0" },
     { name = "grpcio", specifier = ">=1.81.1" },
     { name = "httpx", specifier = "<0.29.0" },
+    { name = "hugegraph-python", marker = "extra == 'graph-hugegraph'", specifier = ">=1.7.1" },
     { name = "instructor", marker = "extra == 'llm-instructor'", specifier = ">=1.15.3" },
     { name = "ipywidgets", marker = "extra == 'viz'", specifier = ">=8.0.0" },
     { name = "kafka-python", marker = "extra == 'infra'", specifier = ">=3.0.2" },
@@ -7434,7 +7456,7 @@ requires-dist = [
     { name = "scipy", specifier = ">=1.13.1" },
     { name = "seaborn", marker = "extra == 'viz'", specifier = ">=0.13.2" },
     { name = "semantica", extras = ["db-snowflake", "db-databricks", "db-salesforce", "db-redshift", "db-cassandra", "db-bigquery", "db-arrow"], marker = "extra == 'db-all'" },
-    { name = "semantica", extras = ["graph-neo4j", "graph-falkordb", "graph-amazon-neptune", "graph-apache-age", "graph-embeddings"], marker = "extra == 'graph-all'" },
+    { name = "semantica", extras = ["graph-neo4j", "graph-hugegraph", "graph-falkordb", "graph-amazon-neptune", "graph-apache-age", "graph-embeddings"], marker = "extra == 'graph-all'" },
     { name = "semantica", extras = ["llm-openai", "llm-groq", "llm-gemini", "llm-anthropic", "llm-ollama", "llm-deepseek", "llm-novita", "llm-litellm", "llm-instructor", "llm-typesafe"], marker = "extra == 'llm-all'" },
     { name = "semantica", extras = ["split-tiktoken", "split-community", "split-topic"], marker = "extra == 'split-all'" },
     { name = "semantica", extras = ["vectorstore-qdrant", "vectorstore-weaviate", "vectorstore-pinecone", "vectorstore-milvus", "vectorstore-pgvector", "vectorstore-sqlite", "vectorstore-faiss"], marker = "extra == 'vectorstore-all'" },
@@ -7462,7 +7484,7 @@ requires-dist = [
     { name = "weaviate-client", marker = "extra == 'vectorstore-weaviate'", specifier = ">=4.0.0" },
     { name = "websockets", marker = "extra == 'explorer'", specifier = ">=15.0.1" },
 ]
-provides-extras = ["llm-openai", "llm-groq", "llm-gemini", "llm-anthropic", "llm-ollama", "llm-deepseek", "llm-novita", "llm-litellm", "llm-instructor", "llm-typesafe", "llm-all", "documents", "parse-docling", "parse-pdf", "shacl", "db-snowflake", "db-databricks", "db-arrow", "db-salesforce", "db-redshift", "ingest-dynamics365", "db-cassandra", "db-bigquery", "ingest-looker", "ingest-parquet", "ingest-arrow", "ingest-tableau", "ingest-sap", "ingest-servicenow", "ingest-airflow", "ingest-git", "db-all", "models-huggingface", "embeddings-local", "nlp-spacy", "nlp-langdetect", "graph-neo4j", "graph-falkordb", "graph-amazon-neptune", "graph-apache-age", "graph-embeddings", "graph-all", "tripletstore-oxigraph", "vectorstore-faiss", "vectorstore-qdrant", "vectorstore-weaviate", "vectorstore-pinecone", "vectorstore-milvus", "vectorstore-pgvector", "vectorstore-sqlite", "vectorstore-all", "infra", "cloud", "monitoring", "viz", "media", "gpu", "agno", "langchain", "google-adk", "open-ontologies", "watch", "split-tiktoken", "split-community", "split-topic", "split-all", "explorer", "explorer-lite", "all"]
+provides-extras = ["llm-openai", "llm-groq", "llm-gemini", "llm-anthropic", "llm-ollama", "llm-deepseek", "llm-novita", "llm-litellm", "llm-instructor", "llm-typesafe", "llm-all", "documents", "parse-docling", "parse-pdf", "shacl", "db-snowflake", "db-databricks", "db-arrow", "db-salesforce", "db-redshift", "ingest-dynamics365", "db-cassandra", "db-bigquery", "ingest-looker", "ingest-parquet", "ingest-arrow", "ingest-tableau", "ingest-sap", "ingest-servicenow", "ingest-airflow", "ingest-git", "db-all", "models-huggingface", "embeddings-local", "nlp-spacy", "nlp-langdetect", "graph-neo4j", "graph-hugegraph", "graph-falkordb", "graph-amazon-neptune", "graph-apache-age", "graph-embeddings", "graph-all", "tripletstore-oxigraph", "vectorstore-faiss", "vectorstore-qdrant", "vectorstore-weaviate", "vectorstore-pinecone", "vectorstore-milvus", "vectorstore-pgvector", "vectorstore-sqlite", "vectorstore-all", "infra", "cloud", "monitoring", "viz", "media", "gpu", "agno", "langchain", "google-adk", "open-ontologies", "watch", "split-tiktoken", "split-community", "split-topic", "split-all", "explorer", "explorer-lite", "all"]
 
 [package.metadata.requires-dev]
 dev = [

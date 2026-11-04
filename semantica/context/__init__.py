@@ -151,6 +151,7 @@ from .drift_search import (
     DriftSearchEngine,
     DriftSearchResult,
 )
+from .query_plan import QueryPlan, QueryPlanItem
 from .registry import MethodRegistry, method_registry
 from .methods import (
     drift_search,
@@ -161,6 +162,8 @@ from .methods import (
 )
 
 __all__ = [
+    "QueryPlan",
+    "QueryPlanItem",
     # High-level interface
     "AgentContext",
     "DecisionContext",
